@@ -438,8 +438,7 @@ module DatapathSingleCycle (
       end
       OpLoad: begin
         we = 1'b1;
-        store_we_to_dmem = 4'b0000;
-        address = rs1_data + imm_i_sext;
+        address = rs1_data + imm_s_sext;
         if (insn_lb) begin  
           case (address[1:0])     
             2'b00:  rd_data = {{24{load_data_from_dmem[7]}}, load_data_from_dmem[7:0]};
@@ -450,8 +449,8 @@ module DatapathSingleCycle (
         end 
         if (insn_lh) begin
             case (address[1])       
-            1'b0:  rd_data = {{16{load_data_from_dmem[15]}}, load_data_from_dmem[15:0]};
-            1'b1:  rd_data = {{16{load_data_from_dmem[31]}}, load_data_from_dmem[31:16]};
+              1'b0:  rd_data = {{16{load_data_from_dmem[15]}}, load_data_from_dmem[15:0]};
+              1'b1:  rd_data = {{16{load_data_from_dmem[31]}}, load_data_from_dmem[31:16]};
             endcase
           end 
         if (insn_lw) begin
