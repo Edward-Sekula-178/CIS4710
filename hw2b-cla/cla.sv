@@ -1,5 +1,5 @@
 `timescale 1ns / 1ps
-`include "../hw2a-divider/divider_unsigned.sv"
+/*`include "../hw2a-divider/divider_unsigned.sv"*/
 
 /**
  * @param a first 1-bit input

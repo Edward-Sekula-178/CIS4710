@@ -88,7 +88,8 @@ module DatapathSingleCycle (
 
   // J - unconditional jumps
   wire [20:0] imm_j;
-  assign {imm_j[20], imm_j[10:1], imm_j[11], imm_j[19:12], imm_j[0]} = {insn_from_imem[31:12], 1'b0};
+  assign {imm_j[20], imm_j[10:1], imm_j[11], imm_j[19:12], imm_j[0]}
+  = {insn_from_imem[31:12], 1'b0};
 
   wire [`REG_SIZE] imm_i_sext = {{20{imm_i[11]}}, imm_i[11:0]};
   wire [`REG_SIZE] imm_s_sext = {{20{imm_s[11]}}, imm_s[11:0]};
@@ -286,26 +287,26 @@ module DatapathSingleCycle (
         if(insn_sltiu) begin
           rd_data = ($unsigned(rs1_data) < $unsigned(imm_i_sext)) ? 32'b01 : 32'b00;
         end
-        if (insn_xori) begin 
+        if (insn_xori) begin
           rd_data = rs1_data ^ imm_i_sext;
         end
-        if (insn_ori) begin 
+        if (insn_ori) begin
           rd_data = rs1_data | imm_i_sext;
         end
         if (insn_andi) begin
           rd_data = rs1_data & imm_i_sext;
         end
-        if (insn_slli) begin 
+        if (insn_slli) begin
           rd_data = rs1_data << imm_i[4:0];
         end
-        if (insn_srli) begin 
+        if (insn_srli) begin
           rd_data = rs1_data >> imm_i[4:0];
         end
         if (insn_srai) begin
           rd_data = $signed(rs1_data) >>> imm_i[4:0];
         end
       end
-      OpRegReg: begin 
+      OpRegReg: begin
         we = 1'b1;
         if (insn_add) begin
           a = rs1_data;
@@ -319,15 +320,15 @@ module DatapathSingleCycle (
           cin = 1'b1;
 
           rd_data = sum;
-        end if (insn_sll) begin 
+        end if (insn_sll) begin
           rd_data = rs1_data << rs2_data[4:0];
         end if(insn_slt) begin
           rd_data = ($signed(rs1_data) < $signed(rs2_data)) ? 32'b01 : 32'b00;
         end if(insn_sltu) begin
           rd_data = ($unsigned(rs1_data) < $unsigned(rs2_data)) ? 32'b01 : 32'b00;
-        end if (insn_xor) begin 
+        end if (insn_xor) begin
           rd_data = rs1_data ^ rs2_data;
-        end if (insn_sra) begin 
+        end if (insn_sra) begin
           rd_data = $signed(rs1_data) >>> rs2_data[4:0];
         end if (insn_srl) begin 
           rd_data = rs1_data >> rs2_data[4:0];
@@ -358,7 +359,7 @@ module DatapathSingleCycle (
           end
 
           if ((rs1_data[31] ~^ rs2_data[31]) || (rs2_data == 32'd0)) begin
-            rd_data = quo;          
+            rd_data = quo;
           end else begin
             rd_data = ~quo + 'd1;
           end 
