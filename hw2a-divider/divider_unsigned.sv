@@ -111,19 +111,6 @@ module divu_1iter (
     output wire [31:0] o_remainder,
     output wire [31:0] o_quotient
 );
-  /*
-    for (int i = 0; i < 32; i++) {
-        remainder = (remainder << 1) | ((dividend >> 31) & 0x1);
-        if (remainder < divisor) {
-            quotient = (quotient << 1);
-        } else {
-            quotient = (quotient << 1) | 0x1;
-            remainder = remainder - divisor;
-        }
-        dividend = dividend << 1;
-    }
-    */
-
     wire [31:0] dividend_temp;
 
     assign dividend_temp[31:0] = {i_remainder[30:0],i_dividend[31]};
@@ -134,13 +121,14 @@ module divu_1iter (
     wire [31:0] sum;
     wire c_out;
 
-    rca32 a32(.cin(1'b1),.a(dividend_temp[31:0]), .b(n_divisor[31:0]), .sum32(sum[31:0]), .carry_out(c_out));
-    
+    rca32 a32(.cin(1'b1),.a(dividend_temp[31:0]), 
+    .b(n_divisor[31:0]), .sum32(sum[31:0]), .carry_out(c_out));
+
     always_comb begin : pos_diff_mux
         if (c_out) begin
-            assign o_remainder[31:0] = sum[31:0];
+            o_remainder[31:0] = sum[31:0];
         end else begin
-            assign o_remainder[31:0] = dividend_temp[31:0];
+            o_remainder[31:0] = dividend_temp[31:0];
         end
     end
 

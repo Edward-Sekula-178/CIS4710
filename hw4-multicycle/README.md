@@ -36,5 +36,5 @@ For this homework, you will again run synthesis and place-and-route to see how m
 
 ## Submitting
 
-Run `make resource-check` and then `make zip` and submit the `multi.zip` file on Gradescope. There is a resource
+Run `make resource-check` and t∂hen `make zip` and submit the `multi.zip` file on Gradescope. There is a resource
 leaderboard for this assignment, but it is strictly informational - no points are awarded to based on the leaderboard.

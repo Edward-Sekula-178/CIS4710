@@ -234,11 +234,11 @@ module DatapathSingleCycle (
 
   divider_unsigned divider(
     .i_dividend(dividend),.i_divisor(divisor),.o_remainder(rem),.o_quotient(quo)
-); 
+);
   logic [31:0] dividend,divisor, rem,quo;
 
   logic [31:0] address;
-    
+
   logic we;
   logic illegal_insn;
 
@@ -248,26 +248,31 @@ module DatapathSingleCycle (
 
   always_comb begin
     pcNext = pcCurrent + 32'd4;
-    rd_data = 32'b00;
+    rd_data = 32'd00;
     we = 1'b0;
     illegal_insn = 1'b0;
     halt = 1'b0;
-    address = 32'b00;
-    addr_to_dmem = {address[31:2], 2'b00};
 
     a = 32'b0;
     b = 32'b0;
     cin = 1'b0;
 
-    dividend = 32'b0000;
-    divisor = 32'b0000;
+    dividend = 32'd0;
+    divisor = 32'd0;
 
-    store_data_to_dmem = 32'b00;
+    address = 32'd00;
+    store_data_to_dmem = 32'd0;
     store_we_to_dmem = 4'b0000;
+    addr_to_dmem = 32'd0;
+
+    m1 = 32'd0;
+    m2 = 32'd0;
+    m3 = 32'd0;
+
 
     case (insn_opcode)
       OpLui: begin
-        rd_data = {imm_u[19:0],12'b000};
+        rd_data = {imm_u[19:0],12'h000};
         we = 1'b1;
       end
       OpAuipc: begin
@@ -280,12 +285,12 @@ module DatapathSingleCycle (
           a = rs1_data;
           b = imm_i_sext;
           rd_data = sum;
-          end 
+          end
         if(insn_slti) begin
-          rd_data = ($signed(rs1_data) < $signed(imm_i_sext)) ? 32'b01 : 32'b00;
+          rd_data = ($signed(rs1_data) < $signed(imm_i_sext)) ? 32'd01 : 32'd00;
         end
         if(insn_sltiu) begin
-          rd_data = ($unsigned(rs1_data) < $unsigned(imm_i_sext)) ? 32'b01 : 32'b00;
+          rd_data = ($unsigned(rs1_data) < $unsigned(imm_i_sext)) ? 32'd01 : 32'd00;
         end
         if (insn_xori) begin
           rd_data = rs1_data ^ imm_i_sext;
@@ -330,9 +335,9 @@ module DatapathSingleCycle (
           rd_data = rs1_data ^ rs2_data;
         end if (insn_sra) begin
           rd_data = $signed(rs1_data) >>> rs2_data[4:0];
-        end if (insn_srl) begin 
+        end if (insn_srl) begin
           rd_data = rs1_data >> rs2_data[4:0];
-        end if (insn_or) begin 
+        end if (insn_or) begin
           rd_data = rs1_data | rs2_data;
         end if (insn_and) begin
           rd_data = rs1_data & rs2_data;
@@ -347,14 +352,14 @@ module DatapathSingleCycle (
         end if (insn_mulhu) begin
           m3 = $unsigned(rs1_data) * $unsigned(rs2_data);
           rd_data = m3[63:32];
-        end if (insn_div) begin 
+        end if (insn_div) begin
           if (rs1_data[31]) begin
             dividend = ~rs1_data + 1;
-          end else begin 
+          end else begin
             dividend = rs1_data;
-          end if (rs2_data[31]) begin 
+          end if (rs2_data[31]) begin
             divisor = ~rs2_data + 1;
-          end else begin 
+          end else begin
             divisor = rs2_data;
           end
 
@@ -362,15 +367,15 @@ module DatapathSingleCycle (
             rd_data = quo;
           end else begin
             rd_data = ~quo + 'd1;
-          end 
-        end if (insn_rem) begin 
+          end
+        end if (insn_rem) begin
           if (rs1_data[31]) begin
             dividend = ~rs1_data + 1;
-          end else begin 
+          end else begin
             dividend = rs1_data;
-          end if (rs2_data[31]) begin 
+          end if (rs2_data[31]) begin
             divisor = ~rs2_data + 1;
-          end else begin 
+          end else begin
             divisor = rs2_data;
           end
 
@@ -379,11 +384,11 @@ module DatapathSingleCycle (
           end else begin
             rd_data = rem;
           end
-        end if (insn_divu) begin 
+        end if (insn_divu) begin
           dividend = rs1_data;
           divisor = $unsigned(rs2_data);
           rd_data = quo;
-        end if (insn_remu) begin 
+        end if (insn_remu) begin
           divisor = $unsigned(rs2_data);
           dividend = rs1_data;
           rd_data = rem;
@@ -417,82 +422,100 @@ module DatapathSingleCycle (
         end
       end
       OpStore: begin
-        store_data_to_dmem = rs2_data;
         address = rs1_data + imm_s_sext;
-        if(insn_sb) begin 
+        addr_to_dmem = {address[31:2], 2'b00};
+        if(insn_sb) begin
            case (address[1:0])
-            2'b00: begin store_we_to_dmem = 4'b0001;  end
-            2'b01: begin store_we_to_dmem = 4'b0010;  end
-            2'b10: begin store_we_to_dmem = 4'b0100;  end
-            2'b11: begin store_we_to_dmem = 4'b1000;  end
+            default: begin illegal_insn = 1; end
+            2'b00: begin
+              store_we_to_dmem = 4'b0001;
+              store_data_to_dmem[7:0] = rs2_data[7:0];
+            end
+            2'b01: begin
+              store_we_to_dmem = 4'b0010;
+              store_data_to_dmem[15:8] = rs2_data[7:0];  end
+            2'b10: begin
+              store_we_to_dmem = 4'b0100;
+              store_data_to_dmem[23:16] = rs2_data[7:0];  end
+            2'b11: begin
+              store_we_to_dmem = 4'b1000;
+              store_data_to_dmem[31:24] = rs2_data[7:0];
+              end
             endcase
-        end
-        if(insn_sh) begin 
+        end else if(insn_sh) begin
           case (address[1])
-            1'b0:begin store_we_to_dmem = 4'b0011;  end
-            1'b1:begin store_we_to_dmem = 4'b1100;  end
+            default: begin illegal_insn = 1; end
+            1'b0:begin
+              store_we_to_dmem = 4'b0011;
+              store_data_to_dmem[15:0] = rs2_data[15:0];
+            end
+            1'b1:begin
+              store_we_to_dmem = 4'b1100;
+              store_data_to_dmem[31:16] = rs2_data[15:0];
+            end
           endcase
-        end
-        if(insn_sw) begin 
+        end else if(insn_sw) begin
+          store_data_to_dmem = rs2_data;
           store_we_to_dmem = 4'b1111;
         end
       end
       OpLoad: begin
+        address = rs1_data + imm_i_sext;
+        addr_to_dmem = {address[31:2], 2'b00};
         we = 1'b1;
-        address = rs1_data + imm_s_sext;
-        if (insn_lb) begin  
-          case (address[1:0])     
+        if (insn_lb) begin
+          case (address[1:0])
+            default: begin illegal_insn = 1; end
             2'b00:  rd_data = {{24{load_data_from_dmem[7]}}, load_data_from_dmem[7:0]};
             2'b01:  rd_data = {{24{load_data_from_dmem[15]}}, load_data_from_dmem[15:8]};
             2'b10:  rd_data = {{24{load_data_from_dmem[23]}}, load_data_from_dmem[23:16]};
             2'b11:  rd_data = {{24{load_data_from_dmem[31]}}, load_data_from_dmem[31:24]};
           endcase
-        end 
-        if (insn_lh) begin
-            case (address[1])       
+        end else if (insn_lh) begin
+            case (address[1])
+              default: begin illegal_insn = 1; end
               1'b0:  rd_data = {{16{load_data_from_dmem[15]}}, load_data_from_dmem[15:0]};
               1'b1:  rd_data = {{16{load_data_from_dmem[31]}}, load_data_from_dmem[31:16]};
             endcase
-          end 
-        if (insn_lw) begin
+        end else if (insn_lw) begin
             rd_data = load_data_from_dmem;
-          end 
-        if (insn_lbu) begin   
-            case (address[1:0])    
+        end else if (insn_lbu) begin
+            case (address[1:0])
+            default: begin illegal_insn = 1; end
             2'b00:  rd_data = {24'b0, load_data_from_dmem[7:0]};
             2'b01:  rd_data = {24'b0, load_data_from_dmem[15:8]};
             2'b10:  rd_data = {24'b0, load_data_from_dmem[23:16]};
             2'b11:  rd_data = {24'b0, load_data_from_dmem[31:24]};
             endcase
-          end 
-        if (insn_lhu) begin   
-            case (addr_to_dmem[1])      
+        end else if (insn_lhu) begin
+            case (address[1])
+            default: begin illegal_insn = 1; end
             1'b0:  rd_data = {16'b0, load_data_from_dmem[15:0]};
             1'b1:  rd_data = {16'b0, load_data_from_dmem[31:16]};
             endcase
           end
       end
-      OpEnviron: begin 
-        if(insn_ecall) begin 
+      OpEnviron: begin
+        if(insn_ecall) begin
           halt = 1'b1;
         end
       end
-      OpJal: begin 
-        if(insn_jal) begin                   
+      OpJal: begin
+        if(insn_jal) begin
           rd_data = pcCurrent + 32'd4;
           pcNext = pcCurrent + imm_j_sext;
           we = 1'b1;
         end
       end
-      OpJalr:begin 
-        if(insn_jalr)  begin                
+      OpJalr:begin
+        if(insn_jalr)  begin
           rd_data = pcCurrent + 32'd4;
           pcNext = (rs1_data + imm_i_sext) & ~1;
-          we = 1'b1; 
+          we = 1'b1;
         end
       end
-      
-      default: begin 
+
+      default: begin
         illegal_insn = 1'b1;
       end
     endcase
