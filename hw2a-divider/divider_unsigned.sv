@@ -121,7 +121,7 @@ module divu_1iter (
     wire [31:0] sum;
     wire c_out;
 
-    rca32 a32(.cin(1'b1),.a(dividend_temp[31:0]), 
+    rca32 a32(.cin(1'b1),.a(dividend_temp[31:0]),
     .b(n_divisor[31:0]), .sum32(sum[31:0]), .carry_out(c_out));
 
     always_comb begin : pos_diff_mux
