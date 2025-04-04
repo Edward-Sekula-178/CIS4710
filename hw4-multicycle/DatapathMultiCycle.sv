@@ -170,6 +170,9 @@ module DatapathMultiCycle (
   wire insn_ecall = insn_opcode == OpEnviron && insn_from_imem[31:7] == 25'd0;
   wire insn_fence = insn_opcode == OpMiscMem;
 
+  logic d_sf;
+
+
   // this code is only for simulation, not synthesis
   `ifndef SYNTHESIS
   `include "../hw3-singlecycle/RvDisassembler.sv"

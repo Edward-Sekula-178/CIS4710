@@ -90,23 +90,13 @@ typedef struct packed {
   logic [`REG_SIZE] pc;
   logic [`INSN_SIZE] insn;
   cycle_status_e cycle_status;
-
-  logic [4:0] rs1;
-  logic [4:0] rs2;
-  logic [4:0] rd;
-
-  /*not sure what parts are needed*/
-
   logic [19:0] imm_u;
-  logic [11:0] imm_s;
-  logic [12:0] imm_b;
-  logic [20:0] imm_j;
-  logic [11:0] imm_i;
-
   logic [`REG_SIZE] imm_i_sext;
   logic [`REG_SIZE] imm_s_sext;
   logic [`REG_SIZE] imm_b_sext;
   logic [`REG_SIZE] imm_j_sext;
+  logic [`REG_SIZE] data_1;
+  logic [`REG_SIZE] data_2;
 
   logic [7:0] insn_ic;
 } stage_execute_t;
@@ -115,12 +105,8 @@ typedef struct packed {
   logic [`REG_SIZE] pc;
   logic [`INSN_SIZE] insn;
   cycle_status_e cycle_status;
-
-  logic [4:0] rs1,rs2,rd;
-
   logic [`REG_SIZE] rd_data;
-  logic we, halt;
-
+  logic [31:0] memory_address,data_dmem;
   logic [7:0] insn_ic;
 } stage_memory_t;
 
@@ -128,11 +114,8 @@ typedef struct packed {
   logic [`REG_SIZE] pc;
   logic [`INSN_SIZE] insn;
   cycle_status_e cycle_status;
-
-  logic [4:0] rd;
+  logic illegal_insn;
   logic [`REG_SIZE] rd_data;
-
-  logic we, halt;
 } stage_writeback_t;
 
 
@@ -172,11 +155,11 @@ module DatapathPipelined (
   RegFile rf (
     .clk(clk),
     .rst(rst),
-    .we(w_we),
-    .rd(w_state.rd),
-    .rd_data(w_rd_data),
-    .rs1(x_state.rs1),
-    .rs2(x_state.rs2),
+    .we(we_to_reg),
+    .rd(rd_to_reg),
+    .rd_data(data_to_reg),
+    .rs1(x_state.insn[19:15]),
+    .rs2(x_state.insn[24:20]),
     .rs1_data(x_rs1_data),
     .rs2_data(x_rs2_data)
   );
@@ -185,27 +168,44 @@ module DatapathPipelined (
   /* FETCH STAGE */
   /***************/
 
-  logic [`REG_SIZE] f_pc_current;
+  logic [`REG_SIZE] f_pc_current, f_pc_next;
   wire [`REG_SIZE] f_insn;
   cycle_status_e f_cycle_status;
 
   // program counter
+  always_comb begin
+    if (rst) begin
+      f_cycle_status = CYCLE_NO_STALL;
+    end else if (x_branch) begin
+      f_cycle_status = CYCLE_TAKEN_BRANCH;
+    end else begin
+      f_cycle_status = CYCLE_NO_STALL;
+    end
+  end
+
+  logic f_div_stall_next, f_div_stall_curr;
+  logic f_load_stall_next, f_load_stall_curr;
+
+  logic f_fence;
+
   always_ff @(posedge clk) begin
     if (rst) begin
       f_pc_current <= 32'd0;
-      // NB: use CYCLE_NO_STALL since this is the value that will persist after the last reset cycle
-      f_cycle_status <= CYCLE_NO_STALL;
-    end else if (x_branch) begin
-      f_pc_current <= x_b_pc;
-      f_cycle_status <= CYCLE_NO_STALL;
+      f_div_stall_curr <= 1'b0;
+      f_load_stall_curr <= 1'b0;
+    end else if (f_fence || f_div_stall_next || f_load_stall_next) begin
+      f_pc_current <= f_pc_current;
+      f_div_stall_curr <= f_div_stall_next;
+      f_load_stall_curr <= f_load_stall_next;
     end else begin
-      f_cycle_status <= CYCLE_NO_STALL;
-      f_pc_current <= f_pc_current + 4;
+      f_pc_current <= f_pc_next;
+      f_div_stall_curr <= f_div_stall_next;
+      f_load_stall_curr <= f_load_stall_next;
     end
   end
   // send PC to imem
   assign pc_to_imem = f_pc_current;
-  assign f_insn = insn_from_imem;
+  assign f_insn = x_branch ? 32'd0 : insn_from_imem;
 
   // Here's how to disassemble an insn into a string you can view in GtkWave.
   // Use PREFIX to provide a 1-character tag to identify which stage the insn comes from.
@@ -233,9 +233,11 @@ module DatapathPipelined (
     end else if (x_branch) begin
       decode_state <= '{
         pc:0,
-        insn: 0,
+        insn: f_insn,
         cycle_status:CYCLE_TAKEN_BRANCH
       };
+    end else if (f_div_stall_next || f_load_stall_next || f_fence) begin
+      decode_state <= decode_state;
     end else begin
         decode_state <= '{
           pc: f_pc_current,
@@ -467,75 +469,47 @@ always_comb begin
   else begin d_ic = ICIllegal; end
 end
 
+  always_comb begin
+    if((d_ic == ICfence)&&(x_store || m_store)) begin f_fence = 1; end
+    else begin f_fence = 0; end
+  end
+
   /*****************/
   /* EXECUTE STAGE */
   /*****************/
 
   stage_execute_t x_state;
   always_ff @(posedge clk) begin
-    if (rst) begin
+    if (rst || f_fence) begin
       x_state <= '{
         pc: 0,
         insn: 0,
-        cycle_status: CYCLE_RESET,
-        rs1:0,
-        rs2:0,
-        rd:0,
+        cycle_status: (rst) ? CYCLE_RESET : CYCLE_FENCEI,
         imm_u:0,
-        imm_s:0,
-        imm_b:0,
-        imm_j:0,
-        imm_i:0,
         imm_i_sext:0,
         imm_s_sext:0,
         imm_b_sext:0,
         imm_j_sext:0,
+        data_1:0,
+        data_2:0,
         insn_ic:0
       };
-    end else if (x_branch) begin
-      x_state <= '{
-        pc: 0,
-        insn: 0,
-        cycle_status: CYCLE_TAKEN_BRANCH,
-        rs1:0,
-        rs2:0,
-        rd:0,
-        imm_u:0,
-        imm_s:0,
-        imm_b:0,
-        imm_j:0,
-        imm_i:0,
-        imm_i_sext:0,
-        imm_s_sext:0,
-        imm_b_sext:0,
-        imm_j_sext:0,
-        insn_ic:0
-      };
-    end
-    else begin
-      begin
+    end else if (f_div_stall_next || f_load_stall_next)  begin
+      x_state <= x_state;
+    end else begin
         x_state <= '{
-          pc: decode_state.pc,
-          insn: decode_state.insn,
-          cycle_status: decode_state.cycle_status,
-          rs1:d_insn_rs1,
-          rs2:d_insn_rs2,
-          rd:d_insn_rd,
-
-          imm_u:d_imm_u,
-          imm_s:d_imm_s,
-          imm_b:d_imm_b,
-          imm_j:d_imm_j,
-          imm_i:d_imm_i,
-
-          imm_i_sext:d_imm_i_sext,
-          imm_s_sext:d_imm_s_sext,
-          imm_b_sext:d_imm_b_sext,
-          imm_j_sext:d_imm_j_sext,
-
-          insn_ic:d_ic
+          pc: (x_branch) ? 0 :  decode_state.pc,
+          insn: (x_branch) ? 0 :  decode_state.insn,
+          cycle_status: (x_branch) ? CYCLE_TAKEN_BRANCH :  decode_state.cycle_status,
+          imm_u: (x_branch) ? 0 : d_imm_u,
+          imm_i_sext: (x_branch) ? 0 : d_imm_i_sext,
+          imm_s_sext: (x_branch) ? 0 : d_imm_s_sext,
+          imm_b_sext: (x_branch) ? 0 : d_imm_b_sext,
+          imm_j_sext: (x_branch) ? 0 : d_imm_j_sext,
+          data_1: (wd_bypass_rs1) ? w_state.rd_data : 0,
+          data_2: (wd_bypass_rs2) ? w_state.rd_data : 0,
+          insn_ic: (x_branch) ? 0 : d_ic
         };
-      end
     end
   end
   wire [255:0] x_disasm;
@@ -545,288 +519,329 @@ end
       .insn  (x_state.insn),
       .disasm(x_disasm)
   );
-  logic x_we, x_illegal_insn, x_branch,x_halt;
-  logic [31:0] x_b_pc;
 
-  logic [4:0] x_rs1, x_rs2, x_rd;
+  // control variables
+  logic x_branch;
+  logic x_con_insn_div;
+  logic d_con_insn_div;
+  logic [2:0] x_cycle_count;
 
-  logic [31:0] x_rd_data, x_data_1, x_data_2;
+  // If we have a div instruction then another type/dependent div, we stall OW not
+  assign x_con_insn_div = (x_state.insn_ic == ICdiv) | (x_state.insn_ic == ICdivu) |
+                      (x_state.insn_ic == ICrem) | (x_state.insn_ic == ICremu);
+  assign d_con_insn_div = (d_ic == ICdiv) | (d_ic == ICdivu) |
+                      (d_ic == ICrem) | (d_ic == ICremu);
+
+  assign f_div_stall_next = (x_con_insn_div && d_con_insn_div && (d_insn_rs1 != x_rd) && (d_insn_rs2 != x_rd)) ?
+                            0 : (x_con_insn_div && x_cycle_count!=3'd7);
+
+  always @(posedge clk) begin
+    if (rst) begin
+      x_cycle_count <= 3'd0;
+    end else if (f_div_stall_next) begin
+      if (x_cycle_count == 3'd7)
+        x_cycle_count <= 3'd0;
+      else
+        x_cycle_count <= x_cycle_count + 3'd1;
+    end else begin
+      x_cycle_count <= 3'd0;
+    end
+  end
+
+  // modules
+  DividerUnsignedPipelined divider(.clk(clk),.rst(rst),.stall(1'b0),
+    .i_dividend(dividend),.i_divisor(divisor),.o_remainder(rem),.o_quotient(quo));
+  logic [31:0] dividend,divisor, rem,quo;
+  logic [63:0] m1,m2,m3;
+
+  cla cla_mod(.a(a),.b(b),.cin(cin),.sum(sum));
+  logic [31:0] a,b,sum;
+  logic cin;
+  // memory
+  logic [31:0] x_memory_address,x_data_dmem;
 
   wire [`REG_SIZE]  x_rs1_data;
   wire [`REG_SIZE]  x_rs2_data;
 
-  logic [31:0] dividend,divisor, rem,quo;
-  logic [63:0] m1,m2,m3;
-  logic cin;
+  logic [31:0] x_rd_data, x_d_1, x_d_2;
 
   logic [11:0] x_imm_i;
   assign x_imm_i = x_state.insn[31:20];
-  wire x_r_rs1 =  (x_state.insn[6:0]==OpRegReg) ||
-                  (x_state.insn[6:0]==OpRegImm) ||
-                  (x_state.insn[6:0]==OpBranch)  ||
-                  (x_state.insn[6:0]==OpStore);
-
-  wire x_r_rs2 =  (x_state.insn[6:0]==OpBranch) ||
-                  (x_state.insn[6:0]==OpStore)  ||
-                  (x_state.insn[6:0]==OpRegReg);
-
 
   always_comb begin
-    x_rd = 0;
+    x_d_1 = (x_state.data_1 == 0) ? x_rs1_data : x_state.data_1;
+    x_d_2 = (x_state.data_2 == 0) ? x_rs2_data : x_state.data_2;
+    if (wx_bypass_rs1) begin x_d_1 = w_state.rd_data; end
+    if (wx_bypass_rs2) begin x_d_2 = w_state.rd_data; end
+    if (mx_bypass_rs1) begin x_d_1 = m_state.rd_data; end
+    if (mx_bypass_rs2) begin x_d_2 = m_state.rd_data; end
+  end
+
+  logic x_store;
+  always_comb begin
+    if(x_state.insn_ic == ICsw || x_state.insn_ic == ICsb || x_state.insn_ic == ICsh) begin x_store = 1; end
+    else begin x_store = 0; end
+  end
+  logic m_store;
+  always_comb begin
+    if(m_state.insn_ic == ICsw || m_state.insn_ic == ICsb || m_state.insn_ic == ICsh) begin m_store = 1; end
+    else begin m_store = 0; end
+  end
+  logic m_load;
+  always_comb begin
+    if(m_state.insn_ic == IClw ||  m_state.insn_ic == IClb || m_state.insn_ic == IClh
+              || m_state.insn_ic == IClhu|| m_state.insn_ic == IClbu) begin m_load = 1; end
+    else begin m_load = 0; end
+  end
+
+  always_comb begin
+
+    // load stall control
+    if (m_load) begin
+      if(x_store) begin
+        if(m_rd == x_rs1 && x_req_rs1) begin f_load_stall_next = (f_load_stall_curr == 1'b0) ? 1'b1 : 1'b0; end
+        else begin f_load_stall_next = 1'b0; end
+      end else begin
+        if(m_rd == x_rs1 && x_req_rs1) begin f_load_stall_next = (f_load_stall_curr == 1'b0) ? 1'b1 : 1'b0; end
+        else if (m_rd == x_rs2 && x_req_rs2) begin f_load_stall_next = (f_load_stall_curr == 1'b0) ? 1'b1 : 1'b0; end
+        else begin f_load_stall_next = 1'b0; end
+      end
+    end else begin f_load_stall_next = 1'b0; end
+
+    // control vars
+    f_pc_next = f_pc_current + 4;
+
     x_rd_data = 32'd00;
-    x_we = 1'b0;
 
-    x_illegal_insn = 1'b0;
     x_branch = 1'b0;
-    x_halt = 1'b0;
-    x_b_pc = 32'd0;
 
-    dividend = 32'd0;
-    divisor = 32'd0;
+    a = 32'b0;
+    b = 32'b0;
+    cin = 0;
+
+    x_memory_address = 0;
+    x_data_dmem = 0;
 
     m1 = 64'd0;
     m2 = 64'd0;
     m3 = 64'd0;
 
-  // BYPASS
-  x_data_1 = x_rs1_data;
-  x_data_2 = x_rs2_data;
-  if ((w_state.rd == x_state.rs1) && x_state.rs1!=0 && w_state.rd !=0 && x_r_rs1 && w_r_mem) begin x_data_1 = w_state.rd_data; end
-  if ((w_state.rd == x_state.rs2) && x_state.rs2!=0 && w_state.rd !=0 && x_r_rs2 && w_r_mem) begin x_data_2 = w_state.rd_data; end
-  if ((m_state.rd == x_state.rs1) && x_state.rs1!=0 && m_state.rd !=0 && x_r_rs1 && m_r_mem) begin x_data_1 = m_state.rd_data; end
-  if ((m_state.rd == x_state.rs2) && x_state.rs2!=0 && m_state.rd !=0 && x_r_rs2 && m_r_mem) begin x_data_2 = m_state.rd_data; end
-  /*writeback still required*/
+    dividend = 32'd0;
+    divisor= 32'd0;
+
     case (x_state.insn_ic)
+      // U-type
       IClui: begin
-        x_rd = x_state.rd;
-        x_rd_data = {x_state.imm_u, 12'b0};
-        x_we = 1'b1;
+        x_rd_data = {x_state.imm_u, 12'd0};
+      end ICauipc: begin
+        x_rd_data = x_state.pc+{x_state.imm_u,12'd0};
       end
+
+      // I-type
       ICaddi: begin
-        x_rd = x_state.rd;
-        x_rd_data = x_data_1 + x_state.imm_i_sext;
-        x_we = 1'b1;
+        a = x_d_1;
+        b = x_state.imm_i_sext;
+        x_rd_data = sum;
       end
       ICslti: begin
-        x_rd = x_state.rd;
-        x_rd_data = $signed(x_data_1) < $signed(x_state.imm_i_sext) ? 32'h00000001 : 32'h00000000;
-        x_we = 1'b1;
+        x_rd_data = $signed(x_d_1) < $signed(x_state.imm_i_sext) ? 32'h00000001 : 32'h00000000;
+      end ICsltiu: begin
+        x_rd_data = $unsigned(x_d_1) < $unsigned(x_state.imm_i_sext) ? 32'h00000001 : 32'h00000000;
+      end ICxori: begin
+        x_rd_data = x_d_1 ^ x_state.imm_i_sext;
+      end ICandi: begin
+        x_rd_data = x_d_1 & x_state.imm_i_sext;
+      end ICori: begin
+        x_rd_data = x_d_1 | x_state.imm_i_sext;
+      end ICslli: begin
+        x_rd_data = x_d_1 << x_state.imm_i_sext[4:0];
+      end ICsrli: begin
+        x_rd_data = x_d_1 >> x_state.imm_i_sext[4:0];
+      end ICsrai: begin
+        x_rd_data = $signed(x_d_1) >>> x_state.imm_i_sext[4:0];
       end
-      ICsltiu: begin
-        x_rd = x_state.rd;
-        x_rd_data = $unsigned(x_data_1) < $unsigned(x_state.imm_i_sext) ? 32'h00000001 : 32'h00000000;
-        x_we = 1'b1;
-      end
-      ICxori: begin
-        x_rd = x_state.rd;
-        x_rd_data = x_data_1 ^ x_state.imm_i_sext;
-        x_we = 1'b1;
-      end
-      ICandi: begin
-        x_rd=x_state.rd;
-        x_rd_data = x_data_1 & x_state.imm_i_sext;
-        x_we = 1'b1;
-      end
-      ICori: begin
-        x_rd = x_state.rd;
-        x_rd_data = x_data_1 | x_state.imm_i_sext;
-        x_we = 1'b1;
-      end
-      ICslli: begin
-        x_rd = x_state.rd;
-        x_rd_data = x_data_1 << x_state.imm_i[4:0];
-        x_we = 1;
-      end
-      ICsrli: begin
-        x_rd = x_state.rd;
-        x_rd_data = x_data_1 >> x_state.imm_i[4:0];
-        x_we = 1;
-      end
-      ICsrai: begin
-        x_rd = x_state.rd;
-        x_rd_data = $signed(x_data_1) >>> x_state.imm_i[4:0];
-        x_we = 1;
-      end
+
+
+      // REG REG
       ICadd: begin
-        x_rd = x_state.rd;
-        x_rd_data = x_data_1+x_data_2;
-        x_we = 1;
+        a = x_d_1;
+        b = x_d_2;
+        x_rd_data = sum;
+      end ICsub: begin
+        a = x_d_1;
+        b = ~x_d_2;
+        x_rd_data = sum;
+        cin = 1'b1;
+      end ICsll: begin
+        x_rd_data  = x_d_1 << x_d_2[4:0];
+      end ICslt: begin
+        x_rd_data = $signed(x_d_1) < $signed(x_d_2) ? 32'h00000001 : 32'h00000000;
+      end ICsltu: begin
+        x_rd_data = $unsigned(x_d_1) < $unsigned(x_d_2) ? 32'h00000001 : 32'h00000000;
+      end ICxor: begin
+        x_rd_data = x_d_1 ^ x_d_2;
+      end ICsrl: begin
+        x_rd_data  = x_d_1  >> x_d_2[4:0];
+      end ICsra: begin
+        x_rd_data = $signed(x_d_1) >>> x_d_2[4:0];
+      end ICor: begin
+        x_rd_data = x_d_1 | x_d_2;
+      end ICand: begin
+        x_rd_data = x_d_1 & x_d_2;
       end
-      ICsub: begin
-        x_rd = x_state.rd;
-        x_rd_data = x_data_1 - x_data_2;
-        x_we = 1;
-      end
-      ICsll: begin 
-        x_rd = x_state.rd;
-        x_rd_data  = x_data_1 << x_data_2[4:0];
-        x_we = 1;
-      end
-      ICslt: begin
-        x_rd = x_state.rd;
-        x_rd_data = $signed(x_data_1) < $signed(x_data_2) ? 32'h00000001 : 32'h00000000;
-        x_we = 1;
-      end
-      ICsltu: begin
-        x_rd = x_state.rd;
-        x_rd_data = $unsigned(x_data_1) < $unsigned(x_data_2) ? 32'h00000001 : 32'h00000000;
-        x_we = 1;
-      end
-      ICxor: begin
-        x_rd = x_state.rd;
-        x_rd_data = x_data_1 ^ x_data_2;
-        x_we = 1;
-      end
-      ICsrl: begin
-        x_rd = x_state.rd;
-        x_rd_data  = x_data_1  >> x_data_2[4:0];
-      end
-      ICsra: begin
-        x_rd = x_state.rd;
-        x_rd_data = $signed(x_data_1) >>> x_data_2[4:0];
-      end
-      ICor: begin
-        x_rd = x_state.rd;
-        x_rd_data = x_data_1 | x_data_2;
-        x_we = 1;
-      end
-      ICand: begin
-        x_rd = x_state.rd;
-        x_rd_data = x_data_1 & x_data_2;
-        x_we = 1;
-      end
+
 
       /*branching*/
       ICbeq: begin
-        if (x_data_1 == x_data_2)begin
-          x_b_pc = x_state.pc + x_state.imm_b_sext;
+        if (x_d_1 == x_d_2)begin
+          f_pc_next = x_state.pc + x_state.imm_b_sext;
+          x_branch = 1;
+        end
+      end ICbne: begin
+        if (x_d_1 != x_d_2)begin
+          f_pc_next = x_state.pc + x_state.imm_b_sext;
+          x_branch = 1;
+        end
+      end ICblt: begin
+        if ($signed(x_d_1) < $signed(x_d_2))begin
+          f_pc_next = x_state.pc + x_state.imm_b_sext;
+          x_branch = 1;
+        end
+      end ICbge: begin
+        if ($signed(x_d_1) >= $signed(x_d_2))begin
+          f_pc_next = x_state.pc + x_state.imm_b_sext;
+          x_branch = 1;
+        end
+      end ICbltu: begin
+        if (x_d_1 < $unsigned(x_d_2))begin
+          f_pc_next = x_state.pc + x_state.imm_b_sext;
+          x_branch = 1;
+        end
+      end ICbgeu: begin
+        if (x_d_1 >= $unsigned(x_d_2))begin
+          f_pc_next = x_state.pc + x_state.imm_b_sext;
           x_branch = 1;
         end
       end
-      ICbne: begin
-        if (x_data_1 != x_data_2)begin
-          x_b_pc = x_state.pc + x_state.imm_b_sext;
-          x_branch = 1;
-        end
+
+      // JAL JALR
+      ICjal: begin
+        x_rd_data = x_state.pc + 32'd4;
+        f_pc_next = x_state.pc + x_state.imm_j_sext;
+        x_branch = 1;
+      end ICjalr: begin
+        x_rd_data = x_state.pc + 32'd4;
+        f_pc_next = (x_d_1 + x_state.imm_i_sext) & ~1;
+        x_branch = 1;
       end
-      ICblt: begin
-        if ($signed(x_data_1) < $signed(x_data_2))begin
-          x_b_pc = x_state.pc + x_state.imm_b_sext;
-          x_branch = 1;
-        end
-      end
-      ICbge: begin
-        if ($signed(x_data_1) >= $signed(x_data_2))begin
-          x_b_pc = x_state.pc + x_state.imm_b_sext;
-          x_branch = 1;
-        end
-      end
-      ICbltu: begin
-        if (x_data_1 < $unsigned(x_data_2))begin
-          x_b_pc = x_state.pc + x_state.imm_b_sext;
-          x_branch = 1;
-        end
-      end
-      ICbgeu: begin
-        if (x_data_1 >= $unsigned(x_data_2))begin
-          x_b_pc = x_state.pc + x_state.imm_b_sext;
-          x_branch = 1;
-        end
-      end
-      default: begin end
 
-
-      InsnDiv : begin
-          
-          x_rd = execute_state.rd;
-
-          if (d1[31])
-            dividend = ~d1 + 1;
-          else
-            dividend = d1;
-          if (d2[31])
-            divisor = ~d2 + 1;
-          else
-            divisor = d2;
-
-          if ((d1[31] ~^ d2[31]) || (d2 == 'd0))
-            x_rd_data = quotient;          
-          else
-            x_rd_data = ~quotient + 'd1;
-            x_we = 1'b1;
-
-        end
-
-      InsnDivu : begin
-          x_rd = execute_state.rd;
-
-          dividend = d1;
-          divisor = $unsigned(d2);
-          x_rd_data = quotient;
-          x_we = 1'b1;
-        end
-
-      InsnRem :  begin
-          x_rd = execute_state.rd;
-
-          if (d1[31])
-            dividend = ~d1 + 1;
-          else
-            dividend = d1;
-          if (d2[31])
-            divisor = ~d2 + 1;
-          else
-            divisor = d2;
-          if (d1[31])
-            x_rd_data = ~remainder + 'd1;
-          else
-            x_rd_data = remainder;
-          x_we = 1'b1;
-
-        end
-
-      InsnRemu: begin
-          x_rd = execute_state.rd;
-
-          dividend = d1;
-          divisor = $unsigned(d2);
-          x_rd_data = remainder;
-          x_we = 1'b1;
-        end
-
-
+      // Multiplication
       ICmul: begin
-          x_rd = x_state.rd;
-          x_rd_data = (x_data_1 * x_data_2);
-          x_we = 1'b1;
-      end
-      ICmulh: begin
-          x_rd = x_state.rd;
-          m1 = {{32{x_data_1[31]}}, x_data_1} * {{32{x_data_2[31]}}, x_data_2};
+
+          x_rd_data = (x_d_1 * x_d_2);
+      end ICmulh: begin
+
+          m1 = {{32{x_d_1[31]}}, x_d_1} * {{32{x_d_2[31]}}, x_d_2};
           x_rd_data = m1[63:32];
-          x_we = 1'b1;
-      end
-      ICmulhsu: begin
-          x_rd = x_state.rd;
-          m2 = {{32{x_data_1[31]}}, x_data_1} * {32'b0, x_data_2};
+      end ICmulhsu: begin
+
+          m2 = {{32{x_d_1[31]}}, x_d_1} * {32'b0, x_d_2};
           x_rd_data = m2[63:32];
-          x_we = 1'b1;
-        end
+      end ICmulhu: begin
 
-      ICmulhu: begin
-          x_rd = x_state.rd;
-          m3 = ($unsigned(x_data_1) * $unsigned(x_data_2));
+          m3 = ($unsigned(x_d_1) * $unsigned(x_d_2));
           x_rd_data = m3[63:32];
-          x_we = 1'b1;
-        end
+      end
 
 
-        ICecall: begin
-          x_halt = 1;
+      // LOAD AND STORE INSTRUCTIONS cin assumed 0
+      IClb: begin
+        a = x_d_1;
+        b = x_state.imm_i_sext;
+        x_memory_address = sum;
+      end IClh: begin
+        a = x_d_1;
+        b = x_state.imm_i_sext;
+        x_memory_address = sum;
+      end IClw: begin
+        a = x_d_1;
+        b = x_state.imm_i_sext;
+        x_memory_address = sum;
+      end IClbu: begin
+        a = x_d_1;
+        b = x_state.imm_i_sext;
+        x_memory_address = sum;
+      end IClhu: begin
+        a = x_d_1;
+        b = x_state.imm_i_sext;
+        x_memory_address = sum;
+      end ICsw: begin
+        a = x_d_1;
+        b = x_state.imm_s_sext;
+        x_memory_address = sum;
+        x_data_dmem = x_d_2;
+      end ICsh: begin
+        a = x_d_1;
+        b = x_state.imm_s_sext;
+        x_memory_address = sum;
+        x_data_dmem = x_d_2;
+      end ICsb: begin
+        a = x_d_1;
+        b = x_state.imm_s_sext;
+        x_memory_address = sum;
+        x_data_dmem = x_d_2;
+      end
+
+      ICdiv: begin
+
+          if (x_d_1[31]) begin
+            dividend = ~x_d_1 + 1;
+          end else begin
+            dividend = x_d_1;
+          end if (x_d_2[31]) begin
+            divisor = ~x_d_2 + 1;
+          end else begin
+            divisor = x_d_2;
+          end
+
+          if ((x_d_1[31] ~^ x_d_2[31]) || (x_d_2 == 32'd0)) begin
+            x_rd_data = quo;
+          end else begin
+            x_rd_data = ~quo + 'd1;
+          end
+      end
+      ICrem: begin
+        if (x_d_1[31]) begin
+          dividend = ~x_d_1 + 1;
+        end else begin
+          dividend = x_d_1;
+        end if (x_d_2[31]) begin
+          divisor = ~x_d_2 + 1;
+        end else begin
+          divisor = x_d_2;
         end
-        ICfence: begin
-          x_we = 1'b0;
+
+        if (x_d_1[31]) begin
+          x_rd_data = ~rem + 1;
+        end else begin
+          x_rd_data = rem;
         end
+      end
+
+      ICdivu: begin
+        dividend = x_d_1;
+        divisor = $unsigned(x_d_2);
+        x_rd_data = quo;
+      end
+
+      ICremu: begin
+        divisor = $unsigned(x_d_2);
+        dividend = x_d_1;
+        x_rd_data = rem;
+      end
+
+      // covers ecall fence and illegal
+      default: begin end
     endcase
 
   // then we process all of the instructions
@@ -842,12 +857,19 @@ end
         pc: 0,
         insn: 0,
         cycle_status: CYCLE_RESET,
-        rs1:0,
-        rs2:0,
-        rd:0,
         rd_data:0,
-        we: 0,
-        halt:0,
+        memory_address:0,
+        data_dmem:0,
+        insn_ic:0
+      };
+    end else if (f_div_stall_curr || f_div_stall_next || f_load_stall_next) begin
+      m_state <= '{
+        pc: 0,
+        insn: 0,
+        cycle_status: f_load_stall_next ? CYCLE_LOAD2USE : CYCLE_DIV2USE,
+        rd_data:0,
+        memory_address:0,
+        data_dmem:0,
         insn_ic:0
       };
     end else begin
@@ -857,13 +879,10 @@ end
           insn: x_state.insn,
           cycle_status: x_state.cycle_status,
 
-          rs1:x_state.rs1,
-          rs2:x_state.rs2,
-          rd:x_state.rd,
-
           rd_data: x_rd_data,
-          we:x_we,
-          halt:x_halt,
+
+          memory_address: x_memory_address,
+          data_dmem: x_data_dmem,
 
           insn_ic:x_state.insn_ic
         };
@@ -878,38 +897,140 @@ end
       .disasm(m_disasm)
   );
 
-    wire m_r_mem =  (m_state.insn[6:0]==OpLui)    ||
-                    (m_state.insn[6:0]==OpRegReg) ||
-                    (m_state.insn[6:0]==OpRegImm) ||
-                    (m_state.insn[6:0]==OpJal);
+  wire m_r_mem =  (m_state.insn[6:0]==OpLui)    ||
+                  (m_state.insn[6:0]==OpRegReg) ||
+                  (m_state.insn[6:0]==OpRegImm) ||
+                  (m_state.insn[6:0]==OpJal);
+
+  logic [31:0] m_rd_data, m_data_to_dmem;
+  logic [3:0] m_we_to_dmem;
+  logic m_illegal_insn;
+
+  always_comb begin
+    if (wm_bypass_data) begin m_data_to_dmem = w_state.rd_data; end
+    else m_data_to_dmem = m_state.data_dmem;
+  end
+
+  assign addr_to_dmem = {m_state.memory_address[31:2],2'b00};
+
+  always_comb begin
+    m_we_to_dmem = 0;
+    m_illegal_insn = 0;
+
+    store_data_to_dmem = 32'd0;
+    store_we_to_dmem = 4'b0000;
+
+    case (m_state.insn_ic)
+      IClw: begin
+        m_rd_data = load_data_from_dmem;
+      end
+      IClh: begin
+        case (m_state.memory_address[1])
+          default: m_illegal_insn = 1;
+          1'b0:  m_rd_data = {{16{load_data_from_dmem[15]}}, load_data_from_dmem[15:0]};
+          1'b1:  m_rd_data = {{16{load_data_from_dmem[31]}}, load_data_from_dmem[31:16]};
+        endcase
+      end
+      IClb: begin
+        case (m_state.memory_address[1:0])
+          default: m_illegal_insn = 1;
+          2'b00:  m_rd_data = {{24{load_data_from_dmem[7]}}, load_data_from_dmem[7:0]};
+          2'b01:  m_rd_data = {{24{load_data_from_dmem[15]}}, load_data_from_dmem[15:8]};
+          2'b10:  m_rd_data = {{24{load_data_from_dmem[23]}}, load_data_from_dmem[23:16]};
+          2'b11:  m_rd_data = {{24{load_data_from_dmem[31]}}, load_data_from_dmem[31:24]};
+        endcase
+      end
+      IClhu: begin
+        case (m_state.memory_address[1])
+          default: m_illegal_insn = 1;
+          1'b0:  m_rd_data = {16'b0, load_data_from_dmem[15:0]};
+          1'b1:  m_rd_data = {16'b0, load_data_from_dmem[31:16]};
+        endcase
+      end
+      IClbu: begin
+        case (m_state.memory_address[1:0])
+          default: m_illegal_insn = 1;
+          2'b00:  m_rd_data = {24'b0, load_data_from_dmem[7:0]};
+          2'b01:  m_rd_data = {24'b0, load_data_from_dmem[15:8]};
+          2'b10:  m_rd_data = {24'b0, load_data_from_dmem[23:16]};
+          2'b11:  m_rd_data = {24'b0, load_data_from_dmem[31:24]};
+        endcase
+      end
+      ICsw: begin
+        store_data_to_dmem = m_data_to_dmem[31:0];
+        store_we_to_dmem = 4'b1111;
+      end
+      ICsh: begin
+         case (m_state.memory_address[1])
+            default: begin m_illegal_insn = 1; end
+            1'b0:begin
+              store_we_to_dmem = 4'b0011;
+              store_data_to_dmem[15:0] = m_data_to_dmem[15:0];
+            end
+            1'b1:begin
+              store_we_to_dmem = 4'b1100;
+              store_data_to_dmem[31:16] = m_data_to_dmem[15:0];
+            end
+          endcase
+      end
+      ICsb: begin
+        case (m_state.memory_address[1:0])
+            default: begin m_illegal_insn = 1; end
+            2'b00: begin
+              store_we_to_dmem = 4'b0001;
+              store_data_to_dmem[7:0] = m_data_to_dmem[7:0];
+            end
+            2'b01: begin
+              store_we_to_dmem = 4'b0010;
+              store_data_to_dmem[15:8] = m_data_to_dmem[7:0];  end
+            2'b10: begin
+              store_we_to_dmem = 4'b0100;
+              store_data_to_dmem[23:16] = m_data_to_dmem[7:0];  end
+            2'b11: begin
+              store_we_to_dmem = 4'b1000;
+              store_data_to_dmem[31:24] = m_data_to_dmem[7:0];
+              end
+            endcase
+       end
+      default: begin
+        m_rd_data = m_state.rd_data;
+        m_illegal_insn = 0;
+        m_we_to_dmem = 0;
+      end
+    endcase
+  end
+
 
   /****************/
   /* WRTBCK STAGE */
   /****************/
 
-   stage_writeback_t w_state;
+  stage_writeback_t w_state;
   always_ff @(posedge clk) begin
     if (rst) begin
       w_state <= '{
         pc: 0,
         insn: 0,
         cycle_status: CYCLE_RESET,
-        rd:0,
         rd_data:0,
-        we: 0,
-        halt:0
+        illegal_insn:0
+      };
+    end else if (f_div_stall_curr) begin
+      w_state <= '{
+        pc: x_state.pc,
+        insn: x_state.insn,
+        cycle_status: x_state.cycle_status,
+        rd_data:x_rd_data,
+        illegal_insn: (x_state.insn_ic == ICIllegal)
       };
     end else begin
         w_state <= '{
           pc: m_state.pc,
           insn: m_state.insn,
           cycle_status: m_state.cycle_status,
+          illegal_insn:m_illegal_insn,
 
-          rd:m_state.rd,
-          rd_data:m_state.rd_data,
-
-          we: m_state.we,
-          halt: m_state.halt
+          rd_data:m_rd_data
         };
     end
   end
@@ -920,25 +1041,116 @@ end
       .insn  (w_state.insn),
       .disasm(w_disasm)
   );
-  logic w_we;
-  logic [`REG_SIZE] w_rd_data;
+
+
+  logic we_to_reg;
+  logic [4:0] rd_to_reg;
+  logic [`REG_SIZE] data_to_reg;
+
+  assign rd_to_reg = w_state.insn[11:7];
+
+  wire regfile_we;
+  assign regfile_we = (w_state.insn == 32'h0 ||
+                      w_state.insn[6:0] == 7'h63 ||
+                      w_state.cycle_status == CYCLE_TAKEN_BRANCH ||
+                      w_state.insn[6:0] == OpStore ||
+                      w_state.insn[6:0] == OpBranch ||
+                      w_state.insn[6:0] == OpMiscMem ||
+                      w_state.insn[6:0] == OpEnviron) ? 1'b0 : 1'b1;
 
   always_comb begin
-    if (w_state.we == 1) begin
-      w_rd_data = w_state.rd_data;
-      w_we = w_state.we;
+    if (regfile_we == 1) begin
+      data_to_reg = w_state.rd_data;
+      we_to_reg = 1;
     end else begin
-      w_rd_data = 32'd0;
-      w_we = 0;
+      data_to_reg = 32'd0;
+      we_to_reg = 0;
     end
   end
 
-  wire w_r_mem = (w_state.insn[6:0]==OpRegImm) ||
-                  (w_state.insn[6:0]==OpRegReg) ||
-                  (w_state.insn[6:0]==OpLui)    ||
-                  (w_state.insn[6:0]==OpJal);
-
   assign halt = (m_state.insn[6:0] == 7'h73) & (m_state.insn[31:7] == 'b0);
+
+    /*****************/
+    /* BYPASS HANDLE */
+    /*****************/
+    wire mx_bypass_rs1;
+    wire mx_bypass_rs2;
+    wire wx_bypass_rs1;
+    wire wx_bypass_rs2;
+    wire wd_bypass_rs1;
+    wire wd_bypass_rs2;
+    wire wm_bypass_data;
+
+
+    wire m_req_rd;
+    wire m_req_rs2;
+    wire w_req_rd;
+    wire x_req_rs1;
+    wire x_req_rs2;
+    wire d_req_rs1;
+    wire d_req_rs2;
+    assign m_req_rd = m_state.insn[6:0] == OpLui    ||
+                    m_state.insn[6:0] == OpAuipc  ||
+                    m_state.insn[6:0] == OpRegImm ||
+                    m_state.insn[6:0] == OpRegReg ||
+                    m_state.insn[6:0] == OpLoad   ||
+                    m_state.insn[6:0] == OpJal    ||
+                    m_state.insn[6:0] == OpJalr;
+
+    assign m_req_rs2 = m_state.insn[6:0] == OpStore;
+
+    assign w_req_rd = w_state.insn[6:0] == OpLui    ||
+                    w_state.insn[6:0] == OpAuipc  ||
+                    w_state.insn[6:0] == OpRegImm ||
+                    w_state.insn[6:0] == OpRegReg ||
+                    w_state.insn[6:0] == OpLoad   ||
+                    w_state.insn[6:0] == OpJal    ||
+                    w_state.insn[6:0] == OpJalr;
+
+    assign x_req_rs1 =  x_state.insn[6:0]==OpRegReg ||
+                    (x_state.insn[6:0]==OpRegImm) ||
+                    (x_state.insn[6:0]==OpBranch) ||
+                    (x_state.insn[6:0]==OpStore)  ||
+                    (x_state.insn[6:0]==OpLoad)   ||
+                    (x_state.insn[6:0]==OpJalr);
+
+    assign x_req_rs2 =  x_state.insn[6:0] == OpRegReg ||
+                      x_state.insn[6:0] == OpStore  ||
+                      x_state.insn[6:0] == OpBranch;
+
+    assign d_req_rs1 =  d_insn_opcode == OpRegImm ||
+                      d_insn_opcode == OpRegReg ||
+                      d_insn_opcode == OpBranch ||
+                      d_insn_opcode == OpLoad   ||
+                      d_insn_opcode == OpStore  ||
+                      d_insn_opcode == OpJalr;
+
+    assign d_req_rs2 =  d_insn_opcode == OpRegReg ||
+                      d_insn_opcode == OpStore  ||
+                      d_insn_opcode == OpBranch;
+
+   logic illegal_insn = x_state.insn_ic == ICIllegal || d_ic == ICIllegal ||
+                        m_state.insn_ic == ICIllegal || m_illegal_insn || w_state.illegal_insn;
+
+    logic [4:0] m_rd,m_rs2,x_rs1,x_rs2,x_rd;
+    assign m_rd = m_state.insn[11:7];
+    assign m_rs2 = m_state.insn[24:20];
+
+    assign x_rs1 = x_state.insn[19:15];
+    assign x_rs2 = x_state.insn[24:20];
+    assign x_rd = x_state.insn[11:7];
+
+
+    assign mx_bypass_rs1 = (x_rs1 == m_rd && illegal_insn == 1'b0 && m_rd != 5'd0 && m_req_rd && x_req_rs1);
+    assign mx_bypass_rs2 = (x_rs2 == m_rd && illegal_insn == 1'b0 && m_rd != 5'd0 && m_req_rd && x_req_rs2);
+
+    assign wx_bypass_rs1 = (x_rs1 == rd_to_reg && illegal_insn == 1'b0 && rd_to_reg != 5'd0 && w_req_rd && x_req_rs1);
+    assign wx_bypass_rs2 = (x_rs2 == rd_to_reg && illegal_insn == 1'b0 && rd_to_reg != 5'd0 && w_req_rd && x_req_rs2);
+
+    assign wd_bypass_rs2 = (d_insn_rs2 == rd_to_reg && rd_to_reg != 5'd0 && w_req_rd && d_req_rs2);
+    assign wd_bypass_rs1 = (d_insn_rs1 == rd_to_reg && rd_to_reg != 5'd0 && w_req_rd && d_req_rs1);
+
+    assign wm_bypass_data = (rd_to_reg == m_rs2 && w_req_rd && m_req_rs2);
 
   assign trace_writeback_pc = w_state.pc;
   assign trace_writeback_insn = w_state.insn;
