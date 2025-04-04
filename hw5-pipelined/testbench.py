@@ -405,7 +405,16 @@ async def test2Div(dut):
         div x3,x1,x1''')
     await preTestSetup(dut)
 
+    # Log initial state
+    dut._log.info(f"Initial x1: {dut.datapath.rf.regs[1].value}")
+
     await ClockCycles(dut.clk, 6 + DIVIDER_STAGES + 1)
+
+    # Log intermediate state
+    dut._log.info(f"x2 after first div: {dut.datapath.rf.regs[2].value}")
+    dut._log.info(f"x3 after second div: {dut.datapath.rf.regs[3].value}")
+
+    # Assertions
     assertEquals(1, dut.datapath.rf.regs[2].value, f'failed at cycle {dut.datapath.cycles_current.value.integer}')
     assertEquals(1, dut.datapath.rf.regs[3].value, f'failed at cycle {dut.datapath.cycles_current.value.integer}')
 

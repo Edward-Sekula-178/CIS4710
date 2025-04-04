@@ -1,5 +1,4 @@
 /* EDWARD SEKULA 84768505 */
-
 `timescale 1ns / 1ns
 
 // quotient = dividend / divisor
@@ -73,100 +72,143 @@ module rca32(input wire cin,
    rca8 a24(.cin(cout2), .a(a[31:24]), .b(b[31:24]), .sum(sum32[31:24]), .cout(carry_out));
 endmodule
 
+typedef struct packed {
+    logic [31:0] pc;
+    logic [31:0] insn;
+    logic [7:0]  insn_ic;
+    cycle_status_e cycle_status;
+    // div stuff
+    logic [31:0] dividend;
+    logic [31:0] remainder;
+    logic [31:0] quotient;
+    logic [31:0] divisor;
+} div_register_t;
+
+
 module DividerUnsignedPipelined (
     input wire clk, rst, stall,
-    input  wire  [31:0] i_dividend,
-    input  wire  [31:0] i_divisor,
+    input wire  [31:0] i_dividend,
+    input wire  [31:0] i_divisor,
+    // HW5 adding controll information
+    input wire [31:0] i_pc, i_insn,
+    input wire [7:0] i_insn_ic,
+    input cycle_status_e i_cycle_status, // for HW5B and later
     output logic [31:0] o_remainder,
-    output logic [31:0] o_quotient
+    output logic [31:0] o_quotient,
+
+    output logic [31:0] o_pc,o_insn,
+    output logic [7:0] o_insn_ic,
+    output cycle_status_e o_cycle_status // for HW5B and later
 );
 /**/
-    wire [31:0] div_temp[33];
-    wire [31:0] rem_temp[33];
-    wire [31:0] q_temp[33];
-    wire [31:0] divisor_temp [33];
+    div_register_t div_registers[7];
 
-    logic [127:0] registers[7];
+    wire [31:0] stage_dividend[8];
+    wire [31:0] stage_remainder[8];
+    wire [31:0] stage_quotient[8];
 
-    assign div_temp[0] = i_dividend;
-    assign rem_temp[0] = 32'b0;
-    assign q_temp[0] = 32'b0;
-
+    stage stage1(
+        .i_dividend(i_dividend),
+        .i_divisor(i_divisor),
+        .i_remainder(32'b0),
+        .i_quotient(32'b0),
+        .o_dividend(stage_dividend[0]),
+        .o_remainder(stage_remainder[0]),
+        .o_quotient(stage_quotient[0])
+    );
     always_ff @(posedge clk) begin
-      if (rst) begin
-        integer j0;
-        for(j0=0;j0<7;j0=j0+1) begin
-          registers[j0] <= 128'd0;
-        end
-      end else begin
-        integer j;
-        for (j=0; j<7;j=j+1) begin
-          registers[j][31:0] <= div_temp[4*(j+1)];
-          if(j==0) begin registers[0][63:32] <= i_divisor; end
-          else begin registers[j][63:32] <= registers[j-1][63:32];end
-          registers[j][95:64] <= rem_temp[4*(j+1)];
-          registers[j][127:96] <= q_temp[4*(j+1)];
-        end
-      end
-    end
+        if(rst) begin
+          div_registers[0] <= '{
+                dividend: 32'b0,
+                remainder: 32'b0,
+                quotient: 32'b0,
+                divisor: 32'b0,
 
-    genvar j3;
-    for (j3 = 1; j3 < 8; j3=j3+1) begin
-      assign div_temp[j3*4] = registers[j3-1][31:0];
-      assign divisor_temp[j3*4] = registers[j3-1][63:32];
-      assign rem_temp[j3*4] = registers[j3-1][95:64];
-      assign q_temp[j3*4] = registers[j3-1][127:96];
+                pc: 32'b0,
+                insn: 32'b0,
+                insn_ic: 8'b0,
+                cycle_status: CYCLE_NO_STALL
+            };
+        end else if (!stall) begin
+            div_registers[0] <= '{
+                dividend: stage_dividend[0],
+                remainder: stage_remainder[0],
+                quotient: stage_quotient[0],
+                divisor: i_divisor,
+
+                pc: i_pc,
+                insn: i_insn,
+                insn_ic: i_insn_ic,
+                cycle_status: i_cycle_status // for HW5B and later
+            };
+        end else begin
+            div_registers[0] <= div_registers[0];
+        end
     end
 
     genvar i;
-    for(i=0;i < 32; i = i + 1) begin
-      if (i<4) begin : gen_cycle_1
-        divu_1iter comparator(.i_dividend(div_temp[i]), .i_divisor(i_divisor),
-          .i_remainder(rem_temp[i]), .i_quotient(q_temp[i]),
-          .o_dividend(div_temp[i+1]), .o_remainder(rem_temp[i+1]),
-          .o_quotient(q_temp[i+1]));
-      end else if (i>3 && i<8) begin: gen_cycle_2
-        divu_1iter comparator(.i_dividend(div_temp[i]), .i_divisor(registers[0][63:32]),
-          .i_remainder(rem_temp[i]), .i_quotient(q_temp[i]),
-          .o_dividend(div_temp[i+1]), .o_remainder(rem_temp[i+1]),
-          .o_quotient(q_temp[i+1]));
-      end else if (7<i && i<12) begin : gen_cycle_3
-        divu_1iter comparator(.i_dividend(div_temp[i]), .i_divisor(registers[1][63:32]),
-          .i_remainder(rem_temp[i]), .i_quotient(q_temp[i]),
-          .o_dividend(div_temp[i+1]), .o_remainder(rem_temp[i+1]),
-          .o_quotient(q_temp[i+1]));
-      end else if (11<i && i<16) begin : gen_cycle_4
-        divu_1iter comparator(.i_dividend(div_temp[i]), .i_divisor(registers[2][63:32]),
-          .i_remainder(rem_temp[i]), .i_quotient(q_temp[i]),
-          .o_dividend(div_temp[i+1]), .o_remainder(rem_temp[i+1]),
-          .o_quotient(q_temp[i+1]));
-      end else if (15<i && i<20) begin : gen_cycle_5
-        divu_1iter comparator(.i_dividend(div_temp[i]), .i_divisor(registers[3][63:32]),
-          .i_remainder(rem_temp[i]), .i_quotient(q_temp[i]),
-          .o_dividend(div_temp[i+1]), .o_remainder(rem_temp[i+1]),
-          .o_quotient(q_temp[i+1]));
-      end else if (19<i && i<24) begin : gen_cycle_6
-        divu_1iter comparator(.i_dividend(div_temp[i]), .i_divisor(registers[4][63:32]),
-          .i_remainder(rem_temp[i]), .i_quotient(q_temp[i]),
-          .o_dividend(div_temp[i+1]), .o_remainder(rem_temp[i+1]),
-          .o_quotient(q_temp[i+1]));
-      end else if (23<i && i<28) begin : gen_cycle_7
-        divu_1iter comparator(.i_dividend(div_temp[i]), .i_divisor(registers[5][63:32]),
-          .i_remainder(rem_temp[i]), .i_quotient(q_temp[i]),
-          .o_dividend(div_temp[i+1]), .o_remainder(rem_temp[i+1]),
-          .o_quotient(q_temp[i+1]));
-      end else if (27<i ) begin: gen_cycle_8
-        divu_1iter comparator(.i_dividend(div_temp[i]), .i_divisor(registers[6][63:32]),
-          .i_remainder(rem_temp[i]), .i_quotient(q_temp[i]),
-          .o_dividend(div_temp[i+1]), .o_remainder(rem_temp[i+1]),
-          .o_quotient(q_temp[i+1]));
-      end
+    for (i=1; i < 7; i = i + 1) begin : gen_stages
+        always_ff @(posedge clk) begin
+            if (rst) begin
+                div_registers[i] <= '{
+                    dividend: 32'b0,
+                    remainder: 32'b0,
+                    quotient: 32'b0,
+                    divisor: 32'b0,
+
+                    pc: 32'b0,
+                    insn: 32'b0,
+                    insn_ic: 8'b0,
+                    cycle_status: CYCLE_NO_STALL
+                };
+            end else if (!stall) begin
+                div_registers[i] <= '{
+                    dividend: stage_dividend[i],
+                    remainder: stage_remainder[i],
+                    quotient: stage_quotient[i],
+                    divisor: div_registers[i-1].divisor, // keep the same divisor
+
+                    // for HW5B and later
+                    pc: div_registers[i-1].pc,
+                    insn: div_registers[i-1].insn,
+                    insn_ic: div_registers[i-1].insn_ic,
+                    cycle_status: div_registers[i-1].cycle_status
+                };
+            end else begin
+                div_registers[i + 1] <= div_registers[i + 1];
+            end
+        end
+
+        assign o_pc = div_registers[6].pc;
+        assign o_insn = div_registers[6].insn;
+        assign o_insn_ic = div_registers[6].insn_ic;
+        assign o_cycle_status = div_registers[6].cycle_status; // for HW5B and later
     end
 
+    // generate stages
+    genvar j;
+    for (j=0; j < 7; j = j + 1) begin : gen_stage
+        stage stage_inst (
+            .i_dividend(div_registers[j].dividend),
+            .i_divisor(div_registers[j].divisor),
+            .i_remainder(div_registers[j].remainder),
+            .i_quotient(div_registers[j].quotient),
+            .o_dividend(stage_dividend[j + 1]),
+            .o_remainder(stage_remainder[j + 1]),
+            .o_quotient(stage_quotient[j + 1])
+        );
+    end
 
-
-    assign o_remainder = rem_temp[32];
-    assign o_quotient =  q_temp[32];
+    wire [31:0] stagef_dividend;
+    stage stagef(
+        .i_dividend(div_registers[6].dividend),
+        .i_divisor(div_registers[6].divisor),
+        .i_remainder(div_registers[6].remainder),
+        .i_quotient(div_registers[6].quotient),
+        .o_dividend(stagef_dividend),
+        .o_remainder(o_remainder),
+        .o_quotient(o_quotient)
+    );
 endmodule
 
 module divu_1iter (
@@ -202,6 +244,42 @@ module divu_1iter (
     assign o_quotient[31:1] = i_quotient[30:0];
     assign o_quotient[0] = c_out;
     assign o_dividend[31:0] = {i_dividend[30:0],1'b0};
+endmodule
+
+module stage (
+    input wire [31:0] i_dividend,
+    input wire [31:0] i_divisor,
+    input wire [31:0] i_remainder,
+    input wire [31:0] i_quotient,
+    output wire [31:0] o_dividend,
+    output wire [31:0] o_remainder,
+    output wire [31:0] o_quotient
+);
+
+    wire [31:0] dividends[5];
+    wire [31:0] remainders[5];
+    wire [31:0] quotients[5];
+
+    assign dividends[0] = i_dividend;
+    assign remainders[0] = i_remainder;
+    assign quotients[0] = i_quotient;
+
+    genvar i;
+    for(i = 1; i < 5; i = i + 1) begin
+        divu_1iter iter(
+            .i_dividend(dividends[i - 1]),
+            .i_divisor(i_divisor),
+            .i_remainder(remainders[i - 1]),
+            .i_quotient(quotients[i - 1]),
+            .o_dividend(dividends[i]),
+            .o_remainder(remainders[i]),
+            .o_quotient(quotients[i])
+        );
+    end
+
+    assign o_dividend = dividends[4];
+    assign o_remainder = remainders[4];
+    assign o_quotient = quotients[4];
 endmodule
 
 

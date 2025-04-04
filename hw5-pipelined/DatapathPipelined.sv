@@ -193,14 +193,17 @@ module DatapathPipelined (
       f_pc_current <= 32'd0;
       f_div_stall_curr <= 1'b0;
       f_load_stall_curr <= 1'b0;
+      m_bubble_curr <= 1'b0;
     end else if (f_fence || f_div_stall_next || f_load_stall_next) begin
       f_pc_current <= f_pc_current;
       f_div_stall_curr <= f_div_stall_next;
       f_load_stall_curr <= f_load_stall_next;
+      m_bubble_curr <= m_bubble_next;
     end else begin
       f_pc_current <= f_pc_next;
       f_div_stall_curr <= f_div_stall_next;
       f_load_stall_curr <= f_load_stall_next;
+      m_bubble_curr <= m_bubble_next;
     end
   end
   // send PC to imem
@@ -524,7 +527,8 @@ end
   logic x_branch;
   logic x_con_insn_div;
   logic d_con_insn_div;
-  logic [2:0] x_cycle_count;
+  logic m_bubble_curr,m_bubble_next;
+  logic [2:0] x_cycle_count, m_cycle_count;
 
   // If we have a div instruction then another type/dependent div, we stall OW not
   assign x_con_insn_div = (x_state.insn_ic == ICdiv) | (x_state.insn_ic == ICdivu) |
@@ -534,6 +538,8 @@ end
 
   assign f_div_stall_next = (x_con_insn_div && d_con_insn_div && (d_insn_rs1 != x_rd) && (d_insn_rs2 != x_rd)) ?
                             0 : (x_con_insn_div && x_cycle_count!=3'd7);
+
+  assign m_bubble_next = x_con_insn_div | (m_bubble_curr && m_cycle_count != 3'd7);
 
   always @(posedge clk) begin
     if (rst) begin
@@ -545,6 +551,17 @@ end
         x_cycle_count <= x_cycle_count + 3'd1;
     end else begin
       x_cycle_count <= 3'd0;
+    end
+
+    if (rst) begin
+      m_cycle_count <= 3'd0;
+    end else if (m_bubble_next) begin
+      if (m_cycle_count == 3'd7)
+        m_cycle_count <= 3'd0;
+      else
+        m_cycle_count <= m_cycle_count + 3'd1;
+    end else begin
+      m_cycle_count <= 3'd0;
     end
   end
 
@@ -862,7 +879,7 @@ end
         data_dmem:0,
         insn_ic:0
       };
-    end else if (f_div_stall_curr || f_div_stall_next || f_load_stall_next) begin
+    end else if (f_div_stall_curr || f_div_stall_next || f_load_stall_next || m_bubble_curr || m_bubble_next) begin
       m_state <= '{
         pc: 0,
         insn: 0,
