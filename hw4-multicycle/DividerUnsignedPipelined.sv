@@ -76,7 +76,6 @@ typedef struct packed {
     logic [31:0] pc;
     logic [31:0] insn;
     logic [7:0]  insn_ic;
-    cycle_status_e cycle_status;
     // div stuff
     logic [31:0] dividend;
     logic [31:0] remainder;
@@ -92,13 +91,11 @@ module DividerUnsignedPipelined (
     // HW5 adding controll information
     input wire [31:0] i_pc, i_insn,
     input wire [7:0] i_insn_ic,
-    input cycle_status_e i_cycle_status, // for HW5B and later
     output logic [31:0] o_remainder,
     output logic [31:0] o_quotient,
 
     output logic [31:0] o_pc,o_insn,
-    output logic [7:0] o_insn_ic,
-    output cycle_status_e o_cycle_status // for HW5B and later
+    output logic [7:0] o_insn_ic
 );
 /**/
     div_register_t div_registers[7];
@@ -126,8 +123,7 @@ module DividerUnsignedPipelined (
 
                 pc: 32'b0,
                 insn: 32'b0,
-                insn_ic: 8'b0,
-                cycle_status: CYCLE_NO_STALL
+                insn_ic: 8'b0
             };
         end else if (!stall) begin
             div_registers[0] <= '{
@@ -138,8 +134,7 @@ module DividerUnsignedPipelined (
 
                 pc: i_pc,
                 insn: i_insn,
-                insn_ic: i_insn_ic,
-                cycle_status: i_cycle_status // for HW5B and later
+                insn_ic: i_insn_ic
             };
         end else begin
             div_registers[0] <= div_registers[0];
@@ -158,8 +153,7 @@ module DividerUnsignedPipelined (
 
                     pc: 32'b0,
                     insn: 32'b0,
-                    insn_ic: 8'b0,
-                    cycle_status: CYCLE_NO_STALL
+                    insn_ic: 8'b0
                 };
             end else if (!stall) begin
                 div_registers[i] <= '{
@@ -171,19 +165,17 @@ module DividerUnsignedPipelined (
                     // for HW5B and later
                     pc: div_registers[i-1].pc,
                     insn: div_registers[i-1].insn,
-                    insn_ic: div_registers[i-1].insn_ic,
-                    cycle_status: div_registers[i-1].cycle_status
+                    insn_ic: div_registers[i-1].insn_ic
                 };
             end else begin
-                div_registers[i + 1] <= div_registers[i + 1];
+                // stall: keep the previous stage's values
+                div_registers[i] <= div_registers[i];
             end
         end
-
-        assign o_pc = div_registers[6].pc;
-        assign o_insn = div_registers[6].insn;
-        assign o_insn_ic = div_registers[6].insn_ic;
-        assign o_cycle_status = div_registers[6].cycle_status; // for HW5B and later
     end
+    assign o_pc = div_registers[6].pc;
+    assign o_insn = div_registers[6].insn;
+    assign o_insn_ic = div_registers[6].insn_ic;
 
     // generate stages
     genvar j;

@@ -193,17 +193,17 @@ module DatapathPipelined (
       f_pc_current <= 32'd0;
       f_div_stall_curr <= 1'b0;
       f_load_stall_curr <= 1'b0;
-      m_bubble_curr <= 1'b0;
+      m_grab_div_curr <= 1'b0;
     end else if (f_fence || f_div_stall_next || f_load_stall_next) begin
       f_pc_current <= f_pc_current;
       f_div_stall_curr <= f_div_stall_next;
       f_load_stall_curr <= f_load_stall_next;
-      m_bubble_curr <= m_bubble_next;
+      m_grab_div_curr <= m_grab_div_next;
     end else begin
       f_pc_current <= f_pc_next;
       f_div_stall_curr <= f_div_stall_next;
       f_load_stall_curr <= f_load_stall_next;
-      m_bubble_curr <= m_bubble_next;
+      m_grab_div_curr <= m_grab_div_next;
     end
   end
   // send PC to imem
@@ -527,19 +527,22 @@ end
   logic x_branch;
   logic x_con_insn_div;
   logic d_con_insn_div;
-  logic m_bubble_curr,m_bubble_next;
-  logic [2:0] x_cycle_count, m_cycle_count;
+  logic m_grab_div_curr, m_grab_div_next, m_bubble_curr, m_bubble_next;
+  logic [2:0] x_cycle_count, m_grab_div_count, m_bubble_count;
 
-  // If we have a div instruction then another type/dependent div, we stall OW not
+  // If the current X instruction is div
   assign x_con_insn_div = (x_state.insn_ic == ICdiv) | (x_state.insn_ic == ICdivu) |
                       (x_state.insn_ic == ICrem) | (x_state.insn_ic == ICremu);
+  // If the current D instruction is div
   assign d_con_insn_div = (d_ic == ICdiv) | (d_ic == ICdivu) |
                       (d_ic == ICrem) | (d_ic == ICremu);
-
+  // If we need to stall the pipeline i.e. if we don't have independent divs
   assign f_div_stall_next = (x_con_insn_div && d_con_insn_div && (d_insn_rs1 != x_rd) && (d_insn_rs2 != x_rd)) ?
                             0 : (x_con_insn_div && x_cycle_count!=3'd7);
+  // We define grab div logic
+  assign m_grab_div_next = d_con_insn_div | (m_grab_div_curr && m_grab_div_count != 7);
 
-  assign m_bubble_next = x_con_insn_div | (m_bubble_curr && m_cycle_count != 3'd7);
+  // assign m_bubble_next = x_con_insn_div | (m_bubble_curr && m_bubble_count != 7);
 
   always @(posedge clk) begin
     if (rst) begin
@@ -553,22 +556,39 @@ end
       x_cycle_count <= 3'd0;
     end
 
-    if (rst) begin
-      m_cycle_count <= 3'd0;
-    end else if (m_bubble_next) begin
-      if (m_cycle_count == 3'd7)
-        m_cycle_count <= 3'd0;
-      else
-        m_cycle_count <= m_cycle_count + 3'd1;
-    end else begin
-      m_cycle_count <= 3'd0;
-    end
+    // if (rst) begin
+    //   m_bubble_count <= 3'd0;
+    // end else if (m_bubble_next) begin
+    //   if (m_bubble_count == 3'd7)
+    //     m_bubble_count <= 3'd0;
+    //   else
+    //     m_bubble_count <= m_bubble_count + 3'd1;
+    // end else begin
+    //   m_bubble_count <= 3'd0;
+    // end
+
+    if(rst) begin m_grab_div_count <= 0; end
+    else if (d_con_insn_div) begin m_grab_div_count <= 0; end
+    else if (m_grab_div_next) begin
+      if (m_grab_div_count == 7) begin m_grab_div_count <= 0; end
+      else begin m_grab_div_count <= m_grab_div_count + 1; end
+    end else begin m_grab_div_count <=0; end
   end
 
   // modules
   DividerUnsignedPipelined divider(.clk(clk),.rst(rst),.stall(1'b0),
-    .i_dividend(dividend),.i_divisor(divisor),.o_remainder(rem),.o_quotient(quo));
-  logic [31:0] dividend,divisor, rem,quo;
+    .i_dividend(dividend),.i_divisor(divisor),.o_remainder(rem),.o_quotient(quo),
+
+    .i_pc(i_div_pc), .i_insn(i_div_insn),
+    .i_insn_ic(i_div_ic),
+
+    .o_pc(div_pc),.o_insn(div_insn),
+    .o_insn_ic(div_insn_ic));
+
+
+  logic [31:0] dividend,divisor, rem,quo, div_pc, div_insn, i_div_insn,i_div_pc;
+  logic [7:0] div_insn_ic, i_div_ic;
+
   logic [63:0] m1,m2,m3;
 
   cla cla_mod(.a(a),.b(b),.cin(cin),.sum(sum));
@@ -645,6 +665,9 @@ end
 
     dividend = 32'd0;
     divisor= 32'd0;
+    i_div_ic = 8'd0;
+    i_div_pc = 32'd0;
+    i_div_insn = 32'd0;
 
     case (x_state.insn_ic)
       // U-type
@@ -810,6 +833,9 @@ end
       end
 
       ICdiv: begin
+          i_div_ic = x_state.insn_ic;
+          i_div_insn = x_state.insn;
+          i_div_pc = x_state.pc;
 
           if (x_d_1[31]) begin
             dividend = ~x_d_1 + 1;
@@ -828,6 +854,9 @@ end
           end
       end
       ICrem: begin
+        i_div_ic = x_state.insn_ic;
+        i_div_insn = x_state.insn;
+        i_div_pc = x_state.pc;
         if (x_d_1[31]) begin
           dividend = ~x_d_1 + 1;
         end else begin
@@ -846,12 +875,18 @@ end
       end
 
       ICdivu: begin
+        i_div_ic = x_state.insn_ic;
+        i_div_insn = x_state.insn;
+        i_div_pc = x_state.pc;
         dividend = x_d_1;
         divisor = $unsigned(x_d_2);
         x_rd_data = quo;
       end
 
       ICremu: begin
+        i_div_ic = x_state.insn_ic;
+        i_div_insn = x_state.insn;
+        i_div_pc = x_state.pc;
         divisor = $unsigned(x_d_2);
         dividend = x_d_1;
         x_rd_data = rem;
@@ -879,7 +914,18 @@ end
         data_dmem:0,
         insn_ic:0
       };
-    end else if (f_div_stall_curr || f_div_stall_next || f_load_stall_next || m_bubble_curr || m_bubble_next) begin
+     end else if (m_grab_div_curr) begin
+      m_state <= '{
+        pc: div_pc,
+        insn: div_insn,
+        cycle_status: CYCLE_DIV2USE,
+        rd_data: x_rd_data,
+
+        memory_address:0,
+        data_dmem: 0,
+
+        insn_ic: div_insn_ic
+      };end else if (f_div_stall_curr || f_div_stall_next || f_load_stall_next) begin
       m_state <= '{
         pc: 0,
         insn: 0,
@@ -889,6 +935,7 @@ end
         data_dmem:0,
         insn_ic:0
       };
+    
     end else begin
       begin
         m_state <= '{
