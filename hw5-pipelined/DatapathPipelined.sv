@@ -1079,14 +1079,6 @@ end
         rd_data:0,
         illegal_insn:0
       };
-    end else if (f_div_stall_curr) begin
-      w_state <= '{
-        pc: x_state.pc,
-        insn: x_state.insn,
-        cycle_status: x_state.cycle_status,
-        rd_data:x_rd_data,
-        illegal_insn: (x_state.insn_ic == ICIllegal)
-      };
     end else begin
         w_state <= '{
           pc: m_state.pc,
