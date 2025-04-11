@@ -674,7 +674,7 @@ end
       IClui: begin
         x_rd_data = {x_state.imm_u, 12'd0};
       end ICauipc: begin
-        x_rd_data = x_state.pc+{x_state.imm_u,12'd0};
+        x_rd_data = x_state.pc + {x_state.insn[31:12],12'd0};
       end
 
       // I-type
@@ -821,14 +821,14 @@ end
         x_memory_address = sum;
         x_data_dmem = x_d_2;
       end ICsh: begin
-        a = x_d_1;
-        b = x_state.imm_s_sext;
-        x_memory_address = sum;
+        x_memory_address = (x_d_1 + x_state.imm_s_sext);
+        cin = 1'b0;
         x_data_dmem = x_d_2;
       end ICsb: begin
         a = x_d_1;
         b = x_state.imm_s_sext;
         x_memory_address = sum;
+        cin = 0;
         x_data_dmem = x_d_2;
       end
 
@@ -925,7 +925,7 @@ end
         data_dmem: 0,
 
         insn_ic: div_insn_ic
-      };end else if (f_div_stall_curr || f_div_stall_next || f_load_stall_next) begin
+      };end else if (f_div_stall_next || f_load_stall_next) begin
       m_state <= '{
         pc: 0,
         insn: 0,
@@ -935,7 +935,6 @@ end
         data_dmem:0,
         insn_ic:0
       };
-    
     end else begin
       begin
         m_state <= '{

@@ -358,149 +358,97 @@ module DividerUnsignedPipelined (
 	stall,
 	i_dividend,
 	i_divisor,
+	i_pc,
+	i_insn,
+	i_insn_ic,
 	o_remainder,
-	o_quotient
+	o_quotient,
+	o_pc,
+	o_insn,
+	o_insn_ic
 );
 	input wire clk;
 	input wire rst;
 	input wire stall;
 	input wire [31:0] i_dividend;
 	input wire [31:0] i_divisor;
+	input wire [31:0] i_pc;
+	input wire [31:0] i_insn;
+	input wire [7:0] i_insn_ic;
 	output wire [31:0] o_remainder;
 	output wire [31:0] o_quotient;
-	wire [31:0] div_temp [0:32];
-	wire [31:0] rem_temp [0:32];
-	wire [31:0] q_temp [0:32];
-	wire [31:0] divisor_temp [0:32];
-	reg [127:0] registers [0:6];
-	assign div_temp[0] = i_dividend;
-	assign rem_temp[0] = 32'b00000000000000000000000000000000;
-	assign q_temp[0] = 32'b00000000000000000000000000000000;
+	output wire [31:0] o_pc;
+	output wire [31:0] o_insn;
+	output wire [7:0] o_insn_ic;
+	reg [199:0] div_registers [0:6];
+	wire [31:0] stage_dividend [0:7];
+	wire [31:0] stage_remainder [0:7];
+	wire [31:0] stage_quotient [0:7];
+	stage stage1(
+		.i_dividend(i_dividend),
+		.i_divisor(i_divisor),
+		.i_remainder(32'b00000000000000000000000000000000),
+		.i_quotient(32'b00000000000000000000000000000000),
+		.o_dividend(stage_dividend[0]),
+		.o_remainder(stage_remainder[0]),
+		.o_quotient(stage_quotient[0])
+	);
 	always @(posedge clk)
-		if (rst) begin : sv2v_autoblock_1
-			integer j0;
-			for (j0 = 0; j0 < 7; j0 = j0 + 1)
-				registers[j0] <= 128'd0;
-		end
-		else begin : sv2v_autoblock_2
-			integer j;
-			for (j = 0; j < 7; j = j + 1)
-				begin
-					registers[j][31:0] <= div_temp[4 * (j + 1)];
-					if (j == 0)
-						registers[0][63:32] <= i_divisor;
-					else
-						registers[j][63:32] <= registers[j - 1][63:32];
-					registers[j][95:64] <= rem_temp[4 * (j + 1)];
-					registers[j][127:96] <= q_temp[4 * (j + 1)];
-				end
-		end
-	genvar _gv_j3_1;
-	generate
-		for (_gv_j3_1 = 1; _gv_j3_1 < 8; _gv_j3_1 = _gv_j3_1 + 1) begin : genblk1
-			localparam j3 = _gv_j3_1;
-			assign div_temp[j3 * 4] = registers[j3 - 1][31:0];
-			assign divisor_temp[j3 * 4] = registers[j3 - 1][63:32];
-			assign rem_temp[j3 * 4] = registers[j3 - 1][95:64];
-			assign q_temp[j3 * 4] = registers[j3 - 1][127:96];
-		end
-	endgenerate
+		if (rst)
+			div_registers[0] <= 200'b00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000;
+		else if (!stall)
+			div_registers[0] <= {i_pc, i_insn, i_insn_ic, stage_dividend[0], stage_remainder[0], stage_quotient[0], i_divisor};
+		else
+			div_registers[0] <= div_registers[0];
 	genvar _gv_i_2;
+	function automatic [31:0] sv2v_cast_32;
+		input reg [31:0] inp;
+		sv2v_cast_32 = inp;
+	endfunction
+	function automatic [7:0] sv2v_cast_8;
+		input reg [7:0] inp;
+		sv2v_cast_8 = inp;
+	endfunction
 	generate
-		for (_gv_i_2 = 0; _gv_i_2 < 32; _gv_i_2 = _gv_i_2 + 1) begin : genblk2
+		for (_gv_i_2 = 1; _gv_i_2 < 7; _gv_i_2 = _gv_i_2 + 1) begin : gen_stages
 			localparam i = _gv_i_2;
-			if (i < 4) begin : gen_cycle_1
-				divu_1iter comparator(
-					.i_dividend(div_temp[i]),
-					.i_divisor(i_divisor),
-					.i_remainder(rem_temp[i]),
-					.i_quotient(q_temp[i]),
-					.o_dividend(div_temp[i + 1]),
-					.o_remainder(rem_temp[i + 1]),
-					.o_quotient(q_temp[i + 1])
-				);
-			end
-			else if ((i > 3) && (i < 8)) begin : gen_cycle_2
-				divu_1iter comparator(
-					.i_dividend(div_temp[i]),
-					.i_divisor(registers[0][63:32]),
-					.i_remainder(rem_temp[i]),
-					.i_quotient(q_temp[i]),
-					.o_dividend(div_temp[i + 1]),
-					.o_remainder(rem_temp[i + 1]),
-					.o_quotient(q_temp[i + 1])
-				);
-			end
-			else if ((7 < i) && (i < 12)) begin : gen_cycle_3
-				divu_1iter comparator(
-					.i_dividend(div_temp[i]),
-					.i_divisor(registers[1][63:32]),
-					.i_remainder(rem_temp[i]),
-					.i_quotient(q_temp[i]),
-					.o_dividend(div_temp[i + 1]),
-					.o_remainder(rem_temp[i + 1]),
-					.o_quotient(q_temp[i + 1])
-				);
-			end
-			else if ((11 < i) && (i < 16)) begin : gen_cycle_4
-				divu_1iter comparator(
-					.i_dividend(div_temp[i]),
-					.i_divisor(registers[2][63:32]),
-					.i_remainder(rem_temp[i]),
-					.i_quotient(q_temp[i]),
-					.o_dividend(div_temp[i + 1]),
-					.o_remainder(rem_temp[i + 1]),
-					.o_quotient(q_temp[i + 1])
-				);
-			end
-			else if ((15 < i) && (i < 20)) begin : gen_cycle_5
-				divu_1iter comparator(
-					.i_dividend(div_temp[i]),
-					.i_divisor(registers[3][63:32]),
-					.i_remainder(rem_temp[i]),
-					.i_quotient(q_temp[i]),
-					.o_dividend(div_temp[i + 1]),
-					.o_remainder(rem_temp[i + 1]),
-					.o_quotient(q_temp[i + 1])
-				);
-			end
-			else if ((19 < i) && (i < 24)) begin : gen_cycle_6
-				divu_1iter comparator(
-					.i_dividend(div_temp[i]),
-					.i_divisor(registers[4][63:32]),
-					.i_remainder(rem_temp[i]),
-					.i_quotient(q_temp[i]),
-					.o_dividend(div_temp[i + 1]),
-					.o_remainder(rem_temp[i + 1]),
-					.o_quotient(q_temp[i + 1])
-				);
-			end
-			else if ((23 < i) && (i < 28)) begin : gen_cycle_7
-				divu_1iter comparator(
-					.i_dividend(div_temp[i]),
-					.i_divisor(registers[5][63:32]),
-					.i_remainder(rem_temp[i]),
-					.i_quotient(q_temp[i]),
-					.o_dividend(div_temp[i + 1]),
-					.o_remainder(rem_temp[i + 1]),
-					.o_quotient(q_temp[i + 1])
-				);
-			end
-			else if (27 < i) begin : gen_cycle_8
-				divu_1iter comparator(
-					.i_dividend(div_temp[i]),
-					.i_divisor(registers[6][63:32]),
-					.i_remainder(rem_temp[i]),
-					.i_quotient(q_temp[i]),
-					.o_dividend(div_temp[i + 1]),
-					.o_remainder(rem_temp[i + 1]),
-					.o_quotient(q_temp[i + 1])
-				);
-			end
+			always @(posedge clk)
+				if (rst)
+					div_registers[i] <= 200'b00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000;
+				else if (!stall)
+					div_registers[i] <= {sv2v_cast_32(div_registers[i - 1][199-:32]), sv2v_cast_32(div_registers[i - 1][167-:32]), sv2v_cast_8(div_registers[i - 1][135-:8]), stage_dividend[i], stage_remainder[i], stage_quotient[i], sv2v_cast_32(div_registers[i - 1][31-:32])};
+				else
+					div_registers[i] <= div_registers[i];
 		end
 	endgenerate
-	assign o_remainder = rem_temp[32];
-	assign o_quotient = q_temp[32];
+	assign o_pc = div_registers[6][199-:32];
+	assign o_insn = div_registers[6][167-:32];
+	assign o_insn_ic = div_registers[6][135-:8];
+	genvar _gv_j_1;
+	generate
+		for (_gv_j_1 = 0; _gv_j_1 < 7; _gv_j_1 = _gv_j_1 + 1) begin : gen_stage
+			localparam j = _gv_j_1;
+			stage stage_inst(
+				.i_dividend(div_registers[j][127-:32]),
+				.i_divisor(div_registers[j][31-:32]),
+				.i_remainder(div_registers[j][95-:32]),
+				.i_quotient(div_registers[j][63-:32]),
+				.o_dividend(stage_dividend[j + 1]),
+				.o_remainder(stage_remainder[j + 1]),
+				.o_quotient(stage_quotient[j + 1])
+			);
+		end
+	endgenerate
+	wire [31:0] stagef_dividend;
+	stage stagef(
+		.i_dividend(div_registers[6][127-:32]),
+		.i_divisor(div_registers[6][31-:32]),
+		.i_remainder(div_registers[6][95-:32]),
+		.i_quotient(div_registers[6][63-:32]),
+		.o_dividend(stagef_dividend),
+		.o_remainder(o_remainder),
+		.o_quotient(o_quotient)
+	);
 endmodule
 module divu_1iter (
 	i_dividend,
@@ -544,6 +492,47 @@ module divu_1iter (
 	assign o_quotient[0] = c_out;
 	assign o_dividend[31:0] = {i_dividend[30:0], 1'b0};
 	initial _sv2v_0 = 0;
+endmodule
+module stage (
+	i_dividend,
+	i_divisor,
+	i_remainder,
+	i_quotient,
+	o_dividend,
+	o_remainder,
+	o_quotient
+);
+	input wire [31:0] i_dividend;
+	input wire [31:0] i_divisor;
+	input wire [31:0] i_remainder;
+	input wire [31:0] i_quotient;
+	output wire [31:0] o_dividend;
+	output wire [31:0] o_remainder;
+	output wire [31:0] o_quotient;
+	wire [31:0] dividends [0:4];
+	wire [31:0] remainders [0:4];
+	wire [31:0] quotients [0:4];
+	assign dividends[0] = i_dividend;
+	assign remainders[0] = i_remainder;
+	assign quotients[0] = i_quotient;
+	genvar _gv_i_3;
+	generate
+		for (_gv_i_3 = 1; _gv_i_3 < 5; _gv_i_3 = _gv_i_3 + 1) begin : genblk1
+			localparam i = _gv_i_3;
+			divu_1iter iter(
+				.i_dividend(dividends[i - 1]),
+				.i_divisor(i_divisor),
+				.i_remainder(remainders[i - 1]),
+				.i_quotient(quotients[i - 1]),
+				.o_dividend(dividends[i]),
+				.o_remainder(remainders[i]),
+				.o_quotient(quotients[i])
+			);
+		end
+	endgenerate
+	assign o_dividend = dividends[4];
+	assign o_remainder = remainders[4];
+	assign o_quotient = quotients[4];
 endmodule
 module Disasm (
 	insn,
@@ -661,21 +650,26 @@ module DatapathPipelined (
 	reg f_load_stall_next;
 	reg f_load_stall_curr;
 	reg f_fence;
+	reg m_grab_div_curr;
+	wire m_grab_div_next;
 	always @(posedge clk)
 		if (rst) begin
 			f_pc_current <= 32'd0;
 			f_div_stall_curr <= 1'b0;
 			f_load_stall_curr <= 1'b0;
+			m_grab_div_curr <= 1'b0;
 		end
 		else if ((f_fence || f_div_stall_next) || f_load_stall_next) begin
 			f_pc_current <= f_pc_current;
 			f_div_stall_curr <= f_div_stall_next;
 			f_load_stall_curr <= f_load_stall_next;
+			m_grab_div_curr <= m_grab_div_next;
 		end
 		else begin
 			f_pc_current <= f_pc_next;
 			f_div_stall_curr <= f_div_stall_next;
 			f_load_stall_curr <= f_load_stall_next;
+			m_grab_div_curr <= m_grab_div_next;
 		end
 	assign pc_to_imem = f_pc_current;
 	assign f_insn = (x_branch ? 32'd0 : insn_from_imem);
@@ -970,12 +964,17 @@ module DatapathPipelined (
 	);
 	wire x_con_insn_div;
 	wire d_con_insn_div;
+	wire m_bubble_curr;
+	wire m_bubble_next;
 	reg [2:0] x_cycle_count;
+	reg [2:0] m_grab_div_count;
+	wire [2:0] m_bubble_count;
 	assign x_con_insn_div = (((x_state[7-:8] == ICdiv) | (x_state[7-:8] == ICdivu)) | (x_state[7-:8] == ICrem)) | (x_state[7-:8] == ICremu);
 	assign d_con_insn_div = (((d_ic == ICdiv) | (d_ic == ICdivu)) | (d_ic == ICrem)) | (d_ic == ICremu);
 	wire [4:0] x_rd;
 	assign f_div_stall_next = (((x_con_insn_div && d_con_insn_div) && (d_insn_rs1 != x_rd)) && (d_insn_rs2 != x_rd) ? 0 : x_con_insn_div && (x_cycle_count != 3'd7));
-	always @(posedge clk)
+	assign m_grab_div_next = d_con_insn_div | (m_grab_div_curr && (m_grab_div_count != 7));
+	always @(posedge clk) begin
 		if (rst)
 			x_cycle_count <= 3'd0;
 		else if (f_div_stall_next) begin
@@ -986,8 +985,27 @@ module DatapathPipelined (
 		end
 		else
 			x_cycle_count <= 3'd0;
+		if (rst)
+			m_grab_div_count <= 0;
+		else if (d_con_insn_div)
+			m_grab_div_count <= 0;
+		else if (m_grab_div_next) begin
+			if (m_grab_div_count == 7)
+				m_grab_div_count <= 0;
+			else
+				m_grab_div_count <= m_grab_div_count + 1;
+		end
+		else
+			m_grab_div_count <= 0;
+	end
+	wire [31:0] div_insn;
+	wire [7:0] div_insn_ic;
+	wire [31:0] div_pc;
 	reg [31:0] dividend;
 	reg [31:0] divisor;
+	reg [7:0] i_div_ic;
+	reg [31:0] i_div_insn;
+	reg [31:0] i_div_pc;
 	wire [31:0] quo;
 	wire [31:0] rem;
 	DividerUnsignedPipelined divider(
@@ -997,7 +1015,13 @@ module DatapathPipelined (
 		.i_dividend(dividend),
 		.i_divisor(divisor),
 		.o_remainder(rem),
-		.o_quotient(quo)
+		.o_quotient(quo),
+		.i_pc(i_div_pc),
+		.i_insn(i_div_insn),
+		.i_insn_ic(i_div_ic),
+		.o_pc(div_pc),
+		.o_insn(div_insn),
+		.o_insn_ic(div_insn_ic)
 	);
 	reg [63:0] m1;
 	reg [63:0] m2;
@@ -1100,9 +1124,12 @@ module DatapathPipelined (
 		m3 = 64'd0;
 		dividend = 32'd0;
 		divisor = 32'd0;
+		i_div_ic = 8'd0;
+		i_div_pc = 32'd0;
+		i_div_insn = 32'd0;
 		case (x_state[7-:8])
 			IClui: x_rd_data = {x_state[219-:20], 12'd0};
-			ICauipc: x_rd_data = x_state[315-:32] + {x_state[219-:20], 12'd0};
+			ICauipc: x_rd_data = x_state[315-:32] + {x_state[219:200], 12'd0};
 			ICaddi: begin
 				a = x_d_1;
 				b = x_state[199-:32];
@@ -1220,9 +1247,7 @@ module DatapathPipelined (
 				x_data_dmem = x_d_2;
 			end
 			ICsh: begin
-				a = x_d_1;
-				b = x_state[167-:32];
-				x_memory_address = sum;
+				x_memory_address = x_d_1 + x_state[167-:32];
 				x_data_dmem = x_d_2;
 			end
 			ICsb: begin
@@ -1232,6 +1257,9 @@ module DatapathPipelined (
 				x_data_dmem = x_d_2;
 			end
 			ICdiv: begin
+				i_div_ic = x_state[7-:8];
+				i_div_insn = x_state[283-:32];
+				i_div_pc = x_state[315-:32];
 				if (x_d_1[31])
 					dividend = ~x_d_1 + 1;
 				else
@@ -1246,6 +1274,9 @@ module DatapathPipelined (
 					x_rd_data = ~quo + 'd1;
 			end
 			ICrem: begin
+				i_div_ic = x_state[7-:8];
+				i_div_insn = x_state[283-:32];
+				i_div_pc = x_state[315-:32];
 				if (x_d_1[31])
 					dividend = ~x_d_1 + 1;
 				else
@@ -1260,11 +1291,17 @@ module DatapathPipelined (
 					x_rd_data = rem;
 			end
 			ICdivu: begin
+				i_div_ic = x_state[7-:8];
+				i_div_insn = x_state[283-:32];
+				i_div_pc = x_state[315-:32];
 				dividend = x_d_1;
 				divisor = $unsigned(x_d_2);
 				x_rd_data = quo;
 			end
 			ICremu: begin
+				i_div_ic = x_state[7-:8];
+				i_div_insn = x_state[283-:32];
+				i_div_pc = x_state[315-:32];
 				divisor = $unsigned(x_d_2);
 				dividend = x_d_1;
 				x_rd_data = rem;
@@ -1276,7 +1313,9 @@ module DatapathPipelined (
 	always @(posedge clk)
 		if (rst)
 			m_state <= 200'h00000000000000000000000100000000000000000000000000;
-		else if ((f_div_stall_curr || f_div_stall_next) || f_load_stall_next)
+		else if (m_grab_div_curr)
+			m_state <= {div_pc, div_insn, 32'd32, x_rd_data, 64'h0000000000000000, div_insn_ic};
+		else if (f_div_stall_next || f_load_stall_next)
 			m_state <= {64'h0000000000000000, (f_load_stall_next ? 32'd16 : 32'd32), 104'h00000000000000000000000000};
 		else
 			m_state <= {sv2v_cast_32(x_state[315-:32]), sv2v_cast_32(x_state[283-:32]), sv2v_cast_32(x_state[251-:32]), x_rd_data, x_memory_address, x_data_dmem, sv2v_cast_8(x_state[7-:8])};
@@ -1383,8 +1422,6 @@ module DatapathPipelined (
 	always @(posedge clk)
 		if (rst)
 			w_state <= 129'h000000000000000000000000200000000;
-		else if (f_div_stall_curr)
-			w_state <= {sv2v_cast_32(x_state[315-:32]), sv2v_cast_32(x_state[283-:32]), sv2v_cast_32(x_state[251-:32]), x_state[7-:8] == ICIllegal, x_rd_data};
 		else
 			w_state <= {sv2v_cast_32(m_state[199-:32]), sv2v_cast_32(m_state[167-:32]), sv2v_cast_32(m_state[135-:32]), m_illegal_insn, m_rd_data};
 	wire [255:0] w_disasm;
