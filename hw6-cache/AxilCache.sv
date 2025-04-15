@@ -184,9 +184,9 @@ module AxilCache #(
 );
 
   // TODO: calculate these
-  localparam int BlockOffsetBits = 0;
-  localparam int IndexBits = 0;
-  localparam int TagBits = 0;
+  localparam int BlockOffsetBits = 2;
+  localparam int IndexBits = 2;
+  localparam int TagBits = 28;
 
   // cache state
   cache_state_t current_state;
@@ -220,13 +220,198 @@ module AxilCache #(
   assign proc.RRESP = `RESP_OK;
   assign proc.BRESP = `RESP_OK;
 
-  // TODO: the rest of your changes will go below
+  // Select correct address bits, depending on type of instruction
+  wire [IndexBits-1:0] index, index_read, index_write;
+  wire [TagBits-1:0] tag_in, tag_in_read, tag_in_write;
+
+
+  assign index_read = proc.ARADDR[IndexBits+BlockOffsetBits-1:BlockOffsetBits];
+  assign tag_in_read = proc.ARADDR[TagBits+IndexBits+BlockOffsetBits-1:IndexBits+BlockOffsetBits];
+
+  assign index_write = proc.AWADDR[IndexBits+BlockOffsetBits-1:BlockOffsetBits];
+  assign tag_in_write = proc.AWADDR[TagBits+IndexBits+BlockOffsetBits-1:IndexBits+BlockOffsetBits];
+
+  assign index = proc.ARVALID ? index_read : index_write;
+  assign tag_in = proc.ARVALID ? tag_in_read : tag_in_write;
+
+  // ------------------------
+  // AXI-Lite Signal Summary (with driver annotation)
+  // ------------------------
+
+  // Global Signals
+  // ACLK    | Global | Shared clock for all transactions
+  // ARESETn | Global | Active-low reset
+
+  // ------------------------------
+  // Read Address (AR) Channel
+  // ------------------------------
+  // ARVALID | proc  | Asserts when proc issues a read request
+  // ARREADY | cch   | Asserted by cache when ready to accept proc request
+  // ARADDR  | proc  | Address to read from
+  // ARPROT  | proc  | Protection bits (unused)
+
+  // mem.ARVALID | cch  | Cache issues read to memory
+  // mem.ARREADY | mem  | Memory ready to accept read
+  // mem.ARADDR  | cch  | Read address sent to memory
+  // mem.ARPROT  | cch  | Protection bits (unused)
+
+  // ------------------------------
+  // Read Data (R) Channel
+  // ------------------------------
+  // RVALID  | cch   | Cache has data to return to proc
+  // RREADY  | proc  | Proc has accepted read data
+  // RDATA   | cch   | Data returned to proc
+  // RRESP   | cch   | Read response (OKAY, etc.)
+
+  // mem.RVALID | mem  | Memory returns data
+  // mem.RREADY | cch  | Cache ready to accept data
+  // mem.RDATA  | mem  | Data from memory
+  // mem.RRESP  | mem  | Response code
+
+  // ------------------------------
+  // Write Address (AW) Channel
+  // ------------------------------
+  // AWVALID | proc  | Proc issues write address
+  // AWREADY | cch   | Cache ready to accept write address
+  // AWADDR  | proc  | Address to write to
+  // AWPROT  | proc  | Protection bits (unused)
+
+  // mem.AWVALID | cch  | Cache sends write address to memory
+  // mem.AWREADY | mem  | Memory ready to accept address
+  // mem.AWADDR  | cch  | Write address to memory
+  // mem.AWPROT  | cch  | Protection bits (unused)
+
+  // ------------------------------
+  // Write Data (W) Channel
+  // ------------------------------
+  // WVALID  | proc  | Proc issues write data
+  // WREADY  | cch   | Cache ready to accept write data
+  // WDATA   | proc  | Write data
+  // WSTRB   | proc  | Byte write mask
+
+  // mem.WVALID | cch  | Cache sends write data to memory
+  // mem.WREADY | mem  | Memory ready to accept data
+  // mem.WDATA  | cch  | Write data
+  // mem.WSTRB  | cch  | Write mask
+
+  // ------------------------------
+  // Write Response (B) Channel
+  // ------------------------------
+  // BVALID  | cch   | Cache returns write response to proc
+  // BREADY  | proc  | Proc ready to accept write response
+  // BRESP   | cch   | Write response code
+
+  // mem.BVALID | mem  | Memory returns write response
+  // mem.BREADY | cch  | Cache ready to accept it
+  // mem.BRESP  | mem  | Write response code
+
+  // Legend:
+  // proc = datapath/processor (AXI manager)
+  // cch  = AxilCache (AXI subordinate to proc, manager to mem)
+  // mem  = AxilMemory (AXI subordinate)
+
+  // ------------------- //
+  // Cache state machine //
+  // ------------------- //
+
 
   always_ff @(posedge ACLK) begin
     if (!ARESETn) begin // NB: reset when ARESETn == 0
       current_state <= CACHE_AVAILABLE;
-    end
-  end
+      // Initialize the AXI interface signals
+      proc.ARREADY <= 1'b1;     // Ready to accept read addresses
+      proc.AWREADY <= 1'b1;     // Ready to accept write addresses
+      proc.WREADY <= 1'b1;      // Ready to accept write data
+      proc.RVALID <= 1'b0;      // No read response ready yet
+      proc.RDATA <= 32'b0;      // No read data ready yet
+      proc.BVALID <= 1'b0;      // No write response ready yet
+
+      // Initialize memory interface signals
+      mem.ARVALID <= 1'b0;      // No read request to memory yet
+      mem.AWVALID <= 1'b0;      // No write request to memory yet
+      mem.WVALID <= 1'b0;       // No write data to memory yet
+      mem.RREADY <= 1'b1;       // Ready to accept read responses from memory
+      mem.BREADY <= 1'b1;       // Ready to accept write responses from memory
+    end else begin
+      case (current_state)
+        CACHE_AVAILABLE: begin
+          if (proc.ARVALID && proc.ARREADY) begin
+            // read request from processor
+            if (valid[index] && tag[index] == tag_in) begin
+              // cache hit, return data
+              proc.RVALID <= 1;
+              proc.RDATA <= data[index];
+              current_state <= CACHE_AWAIT_MANAGER_READY;
+            end else begin
+              // cache miss, request data from memory
+              mem.ARADDR <= proc.ARADDR;
+              mem.ARVALID <= 1;
+              current_state <= CACHE_AWAIT_FILL_RESPONSE;
+            end
+          end else if (proc.AWVALID && proc.AWREADY) begin
+            // write request from processor
+            if (valid[index] && tag[index] == tag_in) begin
+              // cache hit, write data to cache
+              if (proc.WVALID && proc.WREADY) begin
+                data[index] <= proc.WDATA;
+                dirty[index] <= 1; // mark as dirty
+                proc.BVALID <= 1;
+                current_state <= CACHE_AWAIT_MANAGER_READY;
+              end
+            end else begin
+              // cache miss, request data from memory for writeback
+              mem.ARADDR <= proc.AWADDR;
+              mem.ARVALID <= 1;
+              current_state <= CACHE_AWAIT_FILL_RESPONSE;
+            end
+          end
+        end
+
+        CACHE_AWAIT_FILL_RESPONSE: begin
+          if (mem.RVALID && mem.RREADY) begin
+            // fill cache with data from memory
+            data[index] <= mem.RDATA;
+            valid[index] <= 1;
+            dirty[index] <= 0; // assume write-through for now
+            current_state <= CACHE_AWAIT_MANAGER_READY;
+          end else if (proc.AWVALID && proc.AWREADY) begin
+            // fill triggered by write request
+            data[index] <= mem.RDATA;
+            valid[index] <= 0;
+            dirty[index] <= 1; // mark as dirty
+            proc.BVALID <=1;
+            current_state <= CACHE_AWAIT_MANAGER_READY;
+          end
+        end
+
+        CACHE_AWAIT_WRITEBACK_RESPONSE: begin
+          if (mem.BVALID && mem.BREADY) begin
+            // writeback complete, go back to available state
+            current_state <= CACHE_AVAILABLE;
+          end
+        end
+
+        CACHE_AWAIT_MANAGER_READY: begin
+          if (proc.RREADY && proc.RVALID) begin
+            // Manager accepted read response
+            proc.RVALID <= 0;
+            current_state <= CACHE_AVAILABLE;
+          end else if (proc.BREADY && proc.BVALID) begin
+            proc.BVALID <= 0;
+            current_state <= CACHE_AVAILABLE;
+          end else begin
+            // Wait for handshake to complete
+            current_state <= CACHE_AWAIT_MANAGER_READY;
+          end
+        end
+
+        default: begin
+          current_state <= CACHE_AVAILABLE; // reset to available on any unknown state.
+        end
+
+      endcase // case (current_state)
+    end // else: !if(!ARESETn)
+  end // always_ff
 
 endmodule // AxilCache
 
