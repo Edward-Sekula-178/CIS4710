@@ -168,7 +168,9 @@ typedef enum {
   // cache miss, waiting for writeback to memory
   CACHE_AWAIT_WRITEBACK_RESPONSE = 2,
   // cache waiting for manager to accept response
-  CACHE_AWAIT_MANAGER_READY = 3
+  CACHE_AWAIT_MANAGER_READY = 3,
+  // cache waiting for memory to accept request
+  CACHE_AWAIT_MEMORY_READY = 4
 } cache_state_t;
 
 module AxilCache #(
@@ -335,39 +337,33 @@ module AxilCache #(
     end else begin
       case (current_state)
         CACHE_AVAILABLE: begin
-          if (proc.ARVALID && proc.ARREADY) begin
-            // check if cache-hit
-            if (valid[imm_index_read] && tag[imm_index_read]== imm_tag_in_read) begin
+          if (proc.ARVALID && proc.ARREADY && !(proc.RVALID  && !proc.RREADY)) begin
+            buffer_full <= 0;
+            // check for cache hit
+            if (valid[imm_index_read] && (tag[imm_index_read] == imm_tag_in_read)) begin
+              // cache hit, return data
               proc.RVALID <= 1;
               proc.RDATA <= data[imm_index_read];
-              current_state <= CACHE_AWAIT_MANAGER_READY; // wait for manager to accept response
+
+              proc.ARREADY <= 1; // ready to accept another request
+              current_state <= CACHE_AWAIT_MANAGER_READY; // move to waiting state to ensure request is accepted
+
             end else begin
-              // We have a chache-miss so fill from mem
-              current_state <= CACHE_AWAIT_FILL_RESPONSE;
-
-              fill_index <= imm_index_read;
-              fill_tag_in <= imm_tag_in_read;
-              fill_write_data <= 0;
-              fill_write_operation <= 0;
-
-              if (dirty[imm_index_read]) begin
-                // we need to write the dirty block back to memory
-                mem.AWVALID <= 1;
-                mem.AWADDR <= {tag[imm_index_read],imm_index_read, 2'b00};
-                mem.WVALID <= 1;
-                mem.WDATA <= data[imm_index_read];
-                mem.WSTRB <= 4'b1111;
-                mem.BREADY <= 1;
-                current_state <= CACHE_AWAIT_WRITEBACK_RESPONSE; // wait for writeback response
-              end else begin
-                // request block from memory
+              // cache miss, request data from memory
+              curr_index <= imm_index_read;
+              curr_tag_in <= imm_tag_in_read;
+              is_write_operation <= 0; // this is a read operation
+              if (mem.ARREADY) begin
                 mem.ARVALID <= 1;
-                mem.ARADDR <= {imm_tag_in_read, imm_index_read, 2'b00};
+                mem.ARADDR <= proc.ARADDR;
                 mem.RREADY <= 1;
-                current_state <= CACHE_AWAIT_FILL_RESPONSE;//wait for memory response
-                end
+                current_state <= CACHE_AWAIT_FILL_RESPONSE;
+              end else begin
+                current_state <= CACHE_AWAIT_MEMORY_READY;
+              end
             end
-          end else if (proc.AWVALID && proc.AWREADY && proc.WVALID && proc.WREADY) begin //N.B. data passed at same time as address
+            // there is still the case of overwriting a dirty block, but we will consider that later
+          end else if (proc.AWVALID && proc.AWREADY) begin
             // write request from processor
             // check cache-hit
             if (valid[imm_index_write] && tag[imm_index_write]== imm_tag_in_write) begin
@@ -458,57 +454,48 @@ module AxilCache #(
             end
           end
         end
-        CACHE_AWAIT_WRITEBACK_RESPONSE: begin
-          // if we are in this state, we are ready for writeback
-          // handshake
-          if (mem.BVALID && mem.BREADY) begin
-            // Memory accepted our writeback
-            mem.BREADY <= 0;
-            dirty[fill_index] <= 0; // mark the block as clean
 
-            // we now schedule read in the new block if its a read instruction. Finish processing write o.w.
-            if (fill_write_operation) begin
-              data[fill_index] <= fill_write_data;
-              tag[fill_index] <= fill_tag_in;
-              valid[fill_index] <= 1;
-              dirty[fill_index] <= 1;
-              proc.BVALID <= 1;
-              current_state <= CACHE_AWAIT_MANAGER_READY; // wait for manager to accept response
-            end else begin
-              mem.ARVALID <= 1;
-              mem.ARADDR <= {fill_tag_in, fill_index, 2'b00};
-              mem.RREADY <= 1;
-              current_state <= CACHE_AWAIT_FILL_RESPONSE;
-            end
-          end else begin
-            // we are still waiting on memory response
-            current_state <= CACHE_AWAIT_WRITEBACK_RESPONSE;
-          end
-
-          // we need to buffer any new requests we get in the meantime
-          if (proc.ARREADY && proc.AWREADY && proc.WREADY) begin
-            if (proc.ARVALID && proc.ARREADY) begin
-              curr_index <= imm_index_read;
-              curr_tag_in <= imm_tag_in_read;
-              is_write_operation <= 0; // this is a read request
-
-              proc.ARREADY <= 0;
-              proc.AWREADY <= 0;
-              proc.WREADY <= 0;
-            end else if (proc.AWVALID && proc.AWREADY) begin
-              curr_index <= imm_index_write;
-              curr_tag_in <= imm_tag_in_write;
-              curr_write_data <= proc.WDATA;
-              is_write_operation <= 1; // this is a write request
-
-              proc.ARREADY <= 0;
-              proc.AWREADY <= 0;
-              proc.WREADY <= 0;
-            end
-          end
-          // N.B. we only hit this state if we have a missed w/r request where cache block is dirty
-          // thus at this point we are already processing an instruction so we require no processing here
+        CACHE_AWAIT_MEMORY_READY: begin
+         //we are waiting to send a memory request
+        //  in initial tests this case isn't relevant
+          current_state <= CACHE_AWAIT_MEMORY_READY;
         end
+
+        CACHE_AWAIT_FILL_RESPONSE: begin
+          if (mem.RVALID && mem.RREADY) begin
+            // Memory returned data, we can now process the read instruction : note we are only here in the r case
+            data[curr_index] <= mem.RDATA;
+            tag[curr_index] <= curr_tag_in;
+            valid[curr_index] <= 1;
+            dirty[curr_index] <= 0; // new data is not dirty
+
+            // send response to processor
+            proc.RVALID <= 1;
+            proc.RDATA <= mem.RDATA;
+
+            // reset the memory request
+            mem.RREADY <= 0;
+            mem.RVALID <= 0;
+
+            // go back to available state
+            current_state <= CACHE_AWAIT_MANAGER_READY;
+          end else if (mem.RVALID && !mem.RREADY) begin
+            mem.RREADY <= 1; // we are ready to accept the response
+            current_state <= CACHE_AWAIT_FILL_RESPONSE;
+          end else begin
+            // we are still waiting for memory to respond
+            current_state <= CACHE_AWAIT_FILL_RESPONSE;
+          end
+
+          // buffer any requests that are recieved
+        end
+
+        // CACHE_AWAIT_WRITEBACK_RESPONSE: begin
+        //   if (mem.BVALID && mem.BREADY) begin
+        //     // writeback complete, go back to available state
+        //     current_state <= CACHE_AVAILABLE;
+        //   end
+        // end
 
         CACHE_AWAIT_MANAGER_READY: begin
           // Read response handshake
