@@ -337,7 +337,7 @@ module AxilCache #(
         CACHE_AVAILABLE: begin
           if (proc.ARVALID && proc.ARREADY) begin
             // check if cache-hit
-            if (valid[imm_tag_in_read]) begin
+            if (valid[imm_index_read] && tag[imm_index_read]== imm_tag_in_read) begin
               proc.RVALID <= 1;
               proc.RDATA <= data[imm_index_read];
               current_state <= CACHE_AWAIT_MANAGER_READY; // wait for manager to accept response
@@ -363,7 +363,7 @@ module AxilCache #(
           end else if (proc.AWVALID && proc.AWREADY && proc.WVALID && proc.WREADY) begin //N.B. data passed at same time as address
             // write request from processor
             // check cache-hit
-            if (valid[imm_tag_in_write]) begin
+            if (valid[imm_index_write] && tag[imm_index_write]== imm_tag_in_write) begin
               data[imm_index_write] <= proc.WDATA;
               dirty[imm_index_write] <= 1;
               proc.BVALID <= 1;
@@ -389,11 +389,9 @@ module AxilCache #(
               end else begin
                 // we adjust the record of what memory is in the cache and write to cache
 
-                valid[tag[fill_index]] <= 0;
-
                 data[imm_index_write] <= proc.WDATA;
                 tag[imm_index_write] <= imm_tag_in_write; // set the tag for the block
-                valid[imm_tag_in_write] <= 1; // mark the tag as valid
+                valid[imm_index_write] <= 1; // mark the tag as valid
                 dirty[imm_index_write] <= 1; // mark the block as dirty
 
                 data[imm_index_write] <= proc.WDATA;
@@ -412,19 +410,17 @@ module AxilCache #(
           // we are now awaiting a fill response from memory. This is only triggered by an r instruction instruction
           if (mem.RVALID && mem.RREADY) begin
             // Memory has sent back valid data and we are ready for it
-            // mark the old tag as invalid
-            valid[tag[fill_index]] <= 0;
 
             mem.RREADY <= 0;
             data[fill_index] <= mem.RDATA;
             tag[fill_index] <= fill_tag_in; // set the tag for the block
-            valid[fill_tag_in] <= 1; // mark the tag as valid
+            valid[fill_index] <= 1; // mark the tag as valid
             dirty[fill_index] <= 0; // mark the block as dirty if it was a write operation
 
             // we will only be waiting for a fill response if it is a read
             // so we can savely process only a read
             proc.RVALID <= 1;
-            proc.RDATA <= data[fill_index];
+            proc.RDATA <= mem.RDATA;
             current_state <= CACHE_AWAIT_MANAGER_READY; // wait for manager to accept response
           end else begin
             // we are still waiting on memory response
@@ -465,11 +461,9 @@ module AxilCache #(
 
             // we now schedule read in the new block if its a read instruction. Finish processing write o.w.
             if (fill_write_operation) begin
-              // set the old tag invalid
-              valid[tag[fill_index]] <= 0;
               data[fill_index] <= fill_write_data;
               tag[fill_index] <= fill_tag_in; // set the tag for the block
-              valid[fill_tag_in] <= 1; // mark the tag as valid
+              valid[fill_index] <= 1; // mark the tag as valid
               dirty[fill_index] <= 1; // mark the block as dirty
               proc.BVALID <= 1; // write response to processor
               current_state <= CACHE_AWAIT_MANAGER_READY; // wait for manager to accept response
@@ -536,7 +530,7 @@ module AxilCache #(
               proc.AWREADY <= 0;
               proc.WREADY <= 0;
             end else begin
-              if (valid[imm_tag_in_read]) begin
+              if (valid[imm_index_read] && tag[imm_index_read]== imm_tag_in_read) begin
                 proc.RVALID <= 1;
                 proc.RDATA <= data[imm_index_read];
                 current_state <= CACHE_AWAIT_MANAGER_READY; // wait for manager to accept response
@@ -574,7 +568,7 @@ module AxilCache #(
             end else begin
               // write request from processor
               // check cache-hit
-              if (valid[imm_tag_in_write]) begin
+              if (valid[imm_index_write] && tag[imm_index_write]== imm_tag_in_write) begin
                 data[imm_index_write] <= proc.WDATA;
                 dirty[imm_index_write] <= 1;
                 proc.BVALID <= 1;
@@ -599,12 +593,9 @@ module AxilCache #(
                   current_state <= CACHE_AWAIT_WRITEBACK_RESPONSE; // wait for writeback response
                 end else begin
                   // we adjust the record of what memory is in the cache and write to cache
-
-                  valid[tag[fill_index]] <= 0;
-
                   data[imm_index_write] <= proc.WDATA;
                   tag[imm_index_write] <= imm_tag_in_write; // set the tag for the block
-                  valid[imm_tag_in_write] <= 1; // mark the tag as valid
+                  valid[imm_index_write] <= 1; // mark the tag as valid
                   dirty[imm_index_write] <= 1; // mark the block as dirty
 
                   data[imm_index_write] <= proc.WDATA;
@@ -621,7 +612,7 @@ module AxilCache #(
               if (is_write_operation) begin
                 // write request from processor
                 // check cache-hit
-                if (valid[curr_tag_in]) begin
+                if (valid[curr_index] && tag[curr_index]== curr_tag_in) begin
                   data[curr_index] <= curr_write_data;
                   dirty[curr_index] <= 1;
                   proc.BVALID <= 1;
@@ -646,12 +637,9 @@ module AxilCache #(
                     current_state <= CACHE_AWAIT_WRITEBACK_RESPONSE; // wait for writeback response
                   end else begin
                     // we adjust the record of what memory is in the cache and write to cache
-
-                    valid[tag[fill_index]] <= 0;
-
                     data[curr_index] <= proc.WDATA;
                     tag[curr_index] <= curr_tag_in; // set the tag for the block
-                    valid[curr_tag_in] <= 1; // mark the tag as valid
+                    valid[curr_index] <= 1; // mark the tag as valid
                     dirty[curr_index] <= 1; // mark the block as dirty
 
                     data[curr_index] <= proc.WDATA;
