@@ -185,8 +185,8 @@ module AxilCache #(
 
   // TODO: calculate these
   localparam int BlockOffsetBits = 2;
-  localparam int IndexBits = 2;
-  localparam int TagBits = 28;
+  localparam int IndexBits = $clog2(NUM_SETS);
+  localparam int TagBits = `ADDR_WIDTH - IndexBits - BlockOffsetBits;
 
   // cache state
   cache_state_t current_state;
