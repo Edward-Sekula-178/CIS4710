@@ -261,7 +261,7 @@ async def testLazyManager2(dut):
     assertEquals(0, dut.CACHE_ARREADY.value)
 
     await ClockCycles(dut.ACLK, 3)
-    # ensure cache is still waiting manager to ack 1st response
+    # ensure cache is still waiting manager to accept 1st response
     assertEquals(1, dut.CACHE_RVALID.value)
     assertEquals(expected_value4, dut.CACHE_RDATA.value)
     # manager accepts (only) 1st response
