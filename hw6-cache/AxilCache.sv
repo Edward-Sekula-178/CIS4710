@@ -344,21 +344,28 @@ module AxilCache #(
             end else begin
               // We have a chache-miss so fill from mem
               current_state <= CACHE_AWAIT_FILL_RESPONSE;
-              // we need to use the fill-buffer
+
               fill_index <= imm_index_read;
               fill_tag_in <= imm_tag_in_read;
               fill_write_data <= 0;
               fill_write_operation <= 0;
 
               if (dirty[imm_index_read]) begin
+                // we need to write the dirty block back to memory
                 mem.AWVALID <= 1;
                 mem.AWADDR <= {tag[imm_index_read],imm_index_read, 2'b00};
-                mem.WVALID <= 1; // write data to memory
-                mem.WDATA <= data[imm_index_read]; // data to write back
-                mem.WSTRB <= 4'b1111; // write all bytes
+                mem.WVALID <= 1;
+                mem.WDATA <= data[imm_index_read];
+                mem.WSTRB <= 4'b1111;
                 mem.BREADY <= 1;
                 current_state <= CACHE_AWAIT_WRITEBACK_RESPONSE; // wait for writeback response
-              end else begin current_state <= CACHE_AWAIT_FILL_RESPONSE; end
+              end else begin
+                // request block from memory
+                mem.ARVALID <= 1;
+                mem.ARADDR <= {imm_tag_in_read, imm_index_read, 2'b00};
+                mem.RREADY <= 1;
+                current_state <= CACHE_AWAIT_FILL_RESPONSE;//wait for memory response
+                end
             end
           end else if (proc.AWVALID && proc.AWREADY && proc.WVALID && proc.WREADY) begin //N.B. data passed at same time as address
             // write request from processor
@@ -408,9 +415,9 @@ module AxilCache #(
 
         CACHE_AWAIT_FILL_RESPONSE: begin
           // we are now awaiting a fill response from memory. This is only triggered by an r instruction instruction
+
           if (mem.RVALID && mem.RREADY) begin
             // Memory has sent back valid data and we are ready for it
-
             mem.RREADY <= 0;
             data[fill_index] <= mem.RDATA;
             tag[fill_index] <= fill_tag_in; // set the tag for the block
@@ -462,10 +469,10 @@ module AxilCache #(
             // we now schedule read in the new block if its a read instruction. Finish processing write o.w.
             if (fill_write_operation) begin
               data[fill_index] <= fill_write_data;
-              tag[fill_index] <= fill_tag_in; // set the tag for the block
-              valid[fill_index] <= 1; // mark the tag as valid
-              dirty[fill_index] <= 1; // mark the block as dirty
-              proc.BVALID <= 1; // write response to processor
+              tag[fill_index] <= fill_tag_in;
+              valid[fill_index] <= 1;
+              dirty[fill_index] <= 1;
+              proc.BVALID <= 1;
               current_state <= CACHE_AWAIT_MANAGER_READY; // wait for manager to accept response
             end else begin
               mem.ARVALID <= 1;
