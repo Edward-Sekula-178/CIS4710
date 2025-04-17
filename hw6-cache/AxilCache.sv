@@ -446,8 +446,11 @@ module AxilCache #(
               current_state <= CACHE_AWAIT_MANAGER_READY; // wait for manager to accept response
             end
           end else begin
-            // No new request and we had no buffered requests we go back to normal state
-            current_state <= CACHE_AVAILABLE;
+            // No new request and we had no buffered requests we go back to
+            // normal state iff proc accepted return
+            if ((proc.RVALID && proc.RREADY)|| (proc.BVALID && proc.BREADY)) begin
+              current_state <= CACHE_AVAILABLE;
+            end
           end
         end
 
