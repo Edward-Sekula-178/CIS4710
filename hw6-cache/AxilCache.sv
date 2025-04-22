@@ -305,22 +305,25 @@ module AxilCache #(
   // we define an always_ff block to maintain state
   // we use an always_comb block to calculate the next state and handle requests
 
+
   always_ff @(posedge ACLK) begin
     if (!ARESETn) begin
       current_state <= CACHE_AVAILABLE;
 
       proc.ARREADY <= True;
-      proc.RVALID <= False;
-      proc.RDATA <= 0;
-      proc.AWREADY <= True;
+
+      proc_rvalid <= False;
+      proc_rdata <= 0;
+
       proc.WREADY <= True;
       proc.BVALID <= False;
     end else begin
       current_state <= n_current_state;
 
+      proc_rvalid <= n_proc_rvalid;
+      proc_rdata <= n_proc_rdata;
+
       proc.ARREADY  <= n_proc_arready;
-      proc.RVALID   <= n_proc_rvalid;
-      proc.RDATA    <= n_proc_rdata;
       proc.AWREADY  <= n_proc_awready;
       proc.WREADY   <= n_proc_wready;
       proc.BVALID   <= n_proc_bvalid;
@@ -329,8 +332,8 @@ module AxilCache #(
 
   // define next_state variables
   cache_state_t n_current_state;
-  logic [BLOCK_SIZE_BITS-1:0] n_proc_rdata;
-  logic n_proc_arready, n_proc_rvalid, n_proc_awready, n_proc_wready, n_proc_bvalid;
+  logic [BLOCK_SIZE_BITS-1:0] proc_rdata, n_proc_rdata;
+  logic n_proc_arready, proc_rvalid, n_proc_rvalid, n_proc_awready, n_proc_wready, n_proc_bvalid;
 
   // define internal signals
 
@@ -413,11 +416,13 @@ module AxilCache #(
     // default values for all outputs
     n_current_state = current_state;
     n_proc_arready = proc.ARREADY;
-    n_proc_rvalid = proc.RVALID;
-    n_proc_rdata = proc.RDATA;
+    n_proc_rvalid = proc_rvalid;
+    n_proc_rdata = proc_rdata;
     n_proc_awready = proc.AWREADY;
     n_proc_wready = proc.WREADY;
     n_proc_bvalid = proc.BVALID;
+    proc.RVALID = proc_rvalid;
+    proc.RDATA = proc_rdata;
 
     // default values for ram signals
     mem.ARVALID = False;
@@ -430,7 +435,6 @@ module AxilCache #(
     mem.WDATA = 0;
     mem.WSTRB = 0;
     mem.BREADY = False;
-
 
     we = 0;
     wf_mem = 0;
@@ -537,8 +541,15 @@ module AxilCache #(
             dirty_out = f_wstrb_buffer != 0;
           end else begin
             data_out = mem.RDATA;
-            n_proc_rvalid = True;
-            n_proc_rdata = mem.RDATA;
+
+            if (!proc.RREADY) begin
+              n_proc_rvalid = True;
+              n_proc_rdata = mem.RDATA;
+            end
+
+            proc.RVALID = True;
+            proc.RDATA = mem.RDATA;
+
             dirty_out = 0;
           end
           index_out = f_index_buffer;

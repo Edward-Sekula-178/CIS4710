@@ -182,7 +182,7 @@ async def testReadMissAfterWaitingHit(dut):
     assertEquals(0, dut.CACHE_RDATA.value)
     assertEquals(0, dut.CACHE_RVALID.value)
 
-    await ClockCycles(dut.ACLK, 2)
+    await ClockCycles(dut.ACLK, 1)
     assertEquals(expected_value2, dut.CACHE_RDATA.value)
     assertEquals(1, dut.CACHE_RVALID.value)
 
@@ -205,7 +205,7 @@ async def testWriteMiss(dut):
 async def testReadMissWriteback(dut):
     "write miss, then read miss that triggers writeback"
     axil_cache, axil_ram = await preTestSetup(dut)
-    
+
     addr = 0x4
     value0 = 0x1234_5678
     axil_ram.write_dword(addr, value0)
