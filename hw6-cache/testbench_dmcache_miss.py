@@ -204,7 +204,8 @@ async def testWriteMiss(dut):
 @cocotb.test(timeout_time=2*TIMEOUT_NS, timeout_unit="ns")
 async def testReadMissWriteback(dut):
     "write miss, then read miss that triggers writeback"
-    axil_cache, axil_ram = await preTestSetup(
+    axil_cache, axil_ram = await preTestSetup(dut)
+    
     addr = 0x4
     value0 = 0x1234_5678
     axil_ram.write_dword(addr, value0)

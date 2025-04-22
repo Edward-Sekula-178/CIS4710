@@ -315,17 +315,6 @@ module AxilCache #(
       proc.AWREADY <= True;
       proc.WREADY <= True;
       proc.BVALID <= False;
-
-      mem.ARVALID <= False;
-      mem.ARADDR <= 0;
-      mem.RREADY <= True;
-
-      mem.AWVALID <= False;
-      mem.AWADDR <= 0;
-      mem.WVALID <= False;
-      mem.WDATA <= 0;
-      mem.WSTRB <= 0;
-      mem.BREADY <= False;
     end else begin
       current_state <= n_current_state;
 
@@ -335,24 +324,14 @@ module AxilCache #(
       proc.AWREADY  <= n_proc_awready;
       proc.WREADY   <= n_proc_wready;
       proc.BVALID   <= n_proc_bvalid;
-
-      mem.ARVALID   <= n_mem_arvalid;
-      mem.ARADDR    <= n_mem_araddr;
-      mem.RREADY   <= n_mem_rready;
-      mem.AWVALID   <= n_mem_awvalid;
-      mem.AWADDR    <= n_mem_awaddr;
-      mem.WVALID    <= n_mem_wvalid;
-      mem.WDATA     <= n_mem_wdata;
-      mem.BREADY   <= n_mem_bready;
     end
   end // always_ff
 
   // define next_state variables
   cache_state_t n_current_state;
-  logic [BLOCK_SIZE_BITS-1:0] n_proc_rdata, n_mem_araddr, n_mem_awaddr, n_mem_wdata;
+  logic [BLOCK_SIZE_BITS-1:0] n_proc_rdata;
   logic n_proc_arready, n_proc_rvalid, n_proc_awready, n_proc_wready, n_proc_bvalid;
 
-  logic n_mem_arvalid, n_mem_rready, n_mem_bready, n_mem_awvalid, n_mem_wvalid;
   // define internal signals
 
 
@@ -373,7 +352,7 @@ module AxilCache #(
   logic [3:0]                 s_wstrb_buffer, n_wstrb_buffer, f_wstrb_buffer, nf_wstrb_buffer;
   logic                       s_write,        n_write,        f_write,        nf_write;
 
-  logic we, wf_mem;
+  logic we, wf_mem, dirty_out;
   logic [BLOCK_SIZE_BITS-1:0] data_out;
   logic [IndexBits-1:0] index_out;
   logic [3:0] wstrb_out;
@@ -396,10 +375,8 @@ module AxilCache #(
         //block is from memory
         tag[index_out] <= tag_out;
         valid[index_out] <= True;
-        dirty[index_out] <= False;
-      end else begin
-        dirty[index_out] <= True;
       end
+      dirty[index_out] <= dirty_out;
     end
   end
 
@@ -442,8 +419,25 @@ module AxilCache #(
     n_proc_wready = proc.WREADY;
     n_proc_bvalid = proc.BVALID;
 
+    // default values for ram signals
+    mem.ARVALID = False;
+    mem.ARADDR = 0;
+    mem.RREADY = False;
+
+    mem.AWVALID = False;
+    mem.AWADDR = 0;
+    mem.WVALID = False;
+    mem.WDATA = 0;
+    mem.WSTRB = 0;
+    mem.BREADY = False;
+
+
     we = 0;
     wf_mem = 0;
+    data_out = 0;
+    index_out = 0;
+    wstrb_out = 0;
+    tag_out = 0;
     // case on current state
     case (current_state)
       CACHE_AVAILABLE: begin
@@ -457,6 +451,30 @@ module AxilCache #(
             n_proc_rvalid = True;
             n_proc_rdata = data[imm_index_read];
             n_current_state = CACHE_AWAIT_MANAGER_READY;
+          end else begin
+            //Cache miss - we need to fetch the dirty block from memory
+            //fill buffer
+            nf_index_buffer = imm_index_read;
+            nf_tag_buffer = imm_tag_in_read;
+            nf_write = 0;
+
+            if (dirty[imm_index_read]) begin
+              //Write this block back to memory
+              mem.AWVALID = True;
+              mem.AWADDR = {tag[imm_index_read], imm_index_read, 2'b00};
+              mem.WVALID = True;
+              mem.WDATA = data[imm_index_read];
+              mem.WSTRB = 4'b1111;
+              mem.BREADY = True;
+
+              mem.RREADY = False;
+              n_current_state = CACHE_AWAIT_WRITEBACK_RESPONSE;
+            end else begin
+              mem.ARVALID = True;
+              mem.ARADDR = {imm_tag_in_read, imm_index_read, 2'b00};
+              mem.RREADY = True;
+              n_current_state = CACHE_AWAIT_FILL_RESPONSE;
+            end
           end
         end else if (proc.AWVALID && proc.WVALID && proc.ARREADY) begin
           // cache hit
@@ -466,9 +484,34 @@ module AxilCache #(
             data_out = proc.WDATA;
             index_out = imm_index_write;
             wstrb_out = proc.WSTRB;
+            dirty_out = proc.WSTRB != 0;
 
             n_proc_bvalid = True;
             n_current_state = CACHE_AWAIT_MANAGER_READY;
+          end else begin
+            // cache miss
+            nf_index_buffer = imm_index_write;
+            nf_tag_buffer = imm_tag_in_write;
+            nf_wdata_buffer = proc.WDATA;
+            nf_wstrb_buffer = proc.WSTRB;
+            nf_write = 1;
+            if (dirty[imm_index_write]) begin
+              //Write this block back to memory
+              mem.AWVALID = True;
+              mem.AWADDR = {tag[imm_index_write], imm_index_write, 2'b00};
+              mem.WVALID = True;
+              mem.WDATA = data[imm_index_write];
+              mem.WSTRB = 4'b1111;
+              mem.BREADY = True;
+
+              mem.RREADY = False;
+              n_current_state = CACHE_AWAIT_WRITEBACK_RESPONSE;
+            end else begin
+              mem.ARVALID = True;
+              mem.ARADDR = {imm_tag_in_write, imm_index_write, 2'b00};
+              mem.RREADY = True;
+              n_current_state = CACHE_AWAIT_FILL_RESPONSE;
+            end
           end
         end else begin
           n_current_state = CACHE_AVAILABLE;
@@ -476,6 +519,7 @@ module AxilCache #(
       end
 
       CACHE_AWAIT_FILL_RESPONSE: begin
+        mem.RREADY = True;
         if (mem.RVALID && mem.RREADY) begin
           // process incoming response
           if (f_write) begin
@@ -490,10 +534,12 @@ module AxilCache #(
               default: begin data_out = {mem.RDATA[31:8], f_wdata_buffer[7:0]}; end
             endcase
             n_proc_bvalid = True;
+            dirty_out = f_wstrb_buffer != 0;
           end else begin
             data_out = mem.RDATA;
             n_proc_rvalid = True;
             n_proc_rdata = mem.RDATA;
+            dirty_out = 0;
           end
           index_out = f_index_buffer;
           tag_out = f_tag_buffer;
@@ -503,9 +549,46 @@ module AxilCache #(
 
           n_current_state = CACHE_AWAIT_MANAGER_READY;
         end else begin
-          n_mem_rready = True;
           n_current_state = CACHE_AWAIT_FILL_RESPONSE;
         end
+
+        // buffer any instructions recieved this cycle
+        if (proc.ARVALID && proc.ARREADY) begin
+          n_index_buffer = imm_index_read;
+          n_tag_buffer = imm_tag_in_read;
+          n_wdata_buffer = 0;
+          n_wstrb_buffer = 0;
+          n_write = 0;
+          // we are now unable to accept any new requsts
+          n_proc_arready = False;
+          n_proc_awready = False;
+          n_proc_wready = False;
+        end else if (proc.AWVALID && proc.WVALID && proc.ARREADY) begin
+          // process incoming response
+          n_index_buffer = imm_index_write;
+          n_tag_buffer = imm_tag_in_write;
+          n_wdata_buffer = proc.WDATA;
+          n_wstrb_buffer = proc.WSTRB;
+          n_write = 1;
+          // we are now unable to accept any new requsts
+          n_proc_arready = False;
+          n_proc_awready = False;
+          n_proc_wready = False;
+        end
+      end
+
+      CACHE_AWAIT_WRITEBACK_RESPONSE: begin
+        mem.BREADY = True;
+
+        if (mem.BVALID && mem.BREADY) begin
+          n_current_state = CACHE_AWAIT_FILL_RESPONSE;
+
+          mem.ARVALID = True;
+          mem.ARADDR = {f_tag_buffer, f_index_buffer, 2'b00};
+        end else begin
+          n_current_state = CACHE_AWAIT_WRITEBACK_RESPONSE;
+        end
+
         // buffer any instructions recieved this cycle
         if (proc.ARVALID && proc.ARREADY) begin
           n_index_buffer = imm_index_read;
@@ -555,23 +638,33 @@ module AxilCache #(
               n_proc_wready = False;
               n_current_state = CACHE_AWAIT_MANAGER_READY;
           end else begin
-            if (valid[imm_index_read] && tag[imm_index_read] == imm_tag_in_read) begin
+             if (valid[imm_index_read] && tag[imm_index_read] == imm_tag_in_read) begin
               // cache hit
               n_proc_rvalid = True;
               n_proc_rdata = data[imm_index_read];
               n_current_state = CACHE_AWAIT_MANAGER_READY;
             end else begin
-              // cache miss - fetch from mem, if replacing a dirty block, we must writeback
-              if (dirty[imm_index_read]) begin end else begin
-                //request block from memory
-                n_mem_arvalid = True;
-                n_mem_araddr = {imm_tag_in_read, imm_index_read, 2'b00};
-                n_mem_rready = True;
+              //Cache miss - we need to fetch the dirty block from memory
+              //fill buffer
+              nf_index_buffer = imm_index_read;
+              nf_tag_buffer = imm_tag_in_read;
+              nf_write = 0;
 
-                //fill buffer
-                nf_index_buffer = imm_index_read;
-                nf_tag_buffer = imm_tag_in_read;
-                nf_write = 0;
+              if (dirty[imm_index_read]) begin
+                //Write this block back to memory
+                mem.AWVALID = True;
+                mem.AWADDR = {tag[imm_index_read], imm_index_read, 2'b00};
+                mem.WVALID = True;
+                mem.WDATA = data[imm_index_read];
+                mem.WSTRB = 4'b1111;
+                mem.BREADY = True;
+
+                mem.RREADY = False;
+                n_current_state = CACHE_AWAIT_WRITEBACK_RESPONSE;
+              end else begin
+                mem.ARVALID = True;
+                mem.ARADDR = {imm_tag_in_read, imm_index_read, 2'b00};
+                mem.RREADY = True;
                 n_current_state = CACHE_AWAIT_FILL_RESPONSE;
               end
             end
@@ -602,6 +695,27 @@ module AxilCache #(
 
               n_proc_bvalid = True;
               n_current_state = CACHE_AWAIT_MANAGER_READY;
+            end else begin
+              // cache miss
+              nf_index_buffer = imm_index_write;
+              nf_tag_buffer = imm_tag_in_write;
+              nf_wdata_buffer = proc.WDATA;
+              nf_wstrb_buffer = proc.WSTRB;
+              nf_write = 1;
+              if (dirty[imm_index_write]) begin
+                //Write this block back to memory
+                mem.AWVALID = True;
+                mem.ARADDR = {tag[imm_index_write], imm_index_write, 2'b00};
+                mem.WVALID = True;
+                mem.WDATA = data[imm_index_write];
+                mem.WSTRB = 4'b1111;
+
+                n_current_state = CACHE_AWAIT_WRITEBACK_RESPONSE;
+              end else begin
+                mem.ARVALID = True;
+                mem.ARADDR = {imm_tag_in_write, imm_index_write, 2'b00};
+                n_current_state = CACHE_AWAIT_FILL_RESPONSE;
+              end
             end
           end
         end else if (!proc.ARREADY && !proc.AWREADY && !proc.WREADY) begin
@@ -622,21 +736,72 @@ module AxilCache #(
           end else begin
             //manager accepted response - process buffered request
             if (s_write) begin
-              // process incoming response
-              we = 1;
-              data_out = s_wdata_buffer;
-              index_out = s_index_buffer;
-              wstrb_out = s_wstrb_buffer;
+              // write
+              if (valid[s_index_buffer] && tag[s_index_buffer] == s_tag_buffer) begin
+                // cache hit
+                we = 1;
+                data_out = s_wdata_buffer;
+                index_out = s_index_buffer;
+                wstrb_out = s_wstrb_buffer;
+                dirty_out = s_wstrb_buffer != 0;
 
-              n_proc_bvalid = True;
+                n_proc_bvalid = True;
+                n_current_state = CACHE_AWAIT_MANAGER_READY;
+              end else begin
+                // cache miss
+                nf_index_buffer = s_index_buffer;
+                nf_tag_buffer = s_tag_buffer;
+                nf_wdata_buffer = s_wdata_buffer;
+                nf_wstrb_buffer = s_wstrb_buffer;
+                nf_write = 1;
+                if (dirty[s_index_buffer]) begin
+                  //Write this block back to memory
+                  mem.AWVALID = True;
+                  mem.AWADDR = {tag[s_index_buffer], s_index_buffer, 2'b00};
+                  mem.WVALID = True;
+                  mem.WDATA = data[s_index_buffer];
+                  mem.WSTRB = 4'b1111;
+
+                  mem.RREADY = False;
+                  n_current_state = CACHE_AWAIT_WRITEBACK_RESPONSE;
+                end else begin
+                  mem.ARVALID = True;
+                  mem.ARADDR = {s_tag_buffer, s_index_buffer, 2'b00};
+                  n_current_state = CACHE_AWAIT_FILL_RESPONSE;
+                end
+              end
             end else begin
+              // read
               if (valid[s_index_buffer] && tag[s_index_buffer] == s_tag_buffer) begin
                 // cache hit
                 n_proc_rvalid = True;
                 n_proc_rdata = data[s_index_buffer];
+                n_current_state = CACHE_AWAIT_MANAGER_READY;
+              end else begin
+                //Cache miss - we need to fetch the dirty block from memory
+                //fill buffer
+                nf_index_buffer = s_index_buffer;
+                nf_tag_buffer = s_tag_buffer;
+                nf_write = 0;
+
+                if (dirty[s_index_buffer]) begin
+                  //Write this block back to memory
+                  mem.AWVALID = True;
+                  mem.AWADDR = {tag[s_index_buffer], s_index_buffer, 2'b00};
+                  mem.WVALID = True;
+                  mem.WDATA = data[s_index_buffer];
+                  mem.WSTRB = 4'b1111;
+
+                  n_current_state = CACHE_AWAIT_WRITEBACK_RESPONSE;
+                end else begin
+                  mem.ARVALID = True;
+                  mem.ARADDR = {s_tag_buffer, s_index_buffer, 2'b00};
+
+                  n_current_state = CACHE_AWAIT_FILL_RESPONSE;
+                end
               end
+
             end
-            n_current_state = CACHE_AWAIT_MANAGER_READY;
             //zero the buffers
             n_index_buffer = 0;
             n_tag_buffer = 0;
