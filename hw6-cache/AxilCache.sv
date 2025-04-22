@@ -168,9 +168,7 @@ typedef enum {
   // cache miss, waiting for writeback to memory
   CACHE_AWAIT_WRITEBACK_RESPONSE = 2,
   // cache waiting for manager to accept response
-  CACHE_AWAIT_MANAGER_READY = 3,
-  // cache waiting for memory to accept request
-  CACHE_AWAIT_MEMORY_READY = 4
+  CACHE_AWAIT_MANAGER_READY = 3
 } cache_state_t;
 
 module AxilCache #(
@@ -198,6 +196,9 @@ module AxilCache #(
   logic [0:0] valid[NUM_SETS];
   logic [0:0] dirty[NUM_SETS];
 
+  localparam bit True = 1'b1;
+  localparam bit False = 1'b0;
+
   // initialize cache state to all zeroes
   genvar seti;
   for (seti = 0; seti < NUM_SETS; seti = seti + 1) begin : gen_cache_init
@@ -221,22 +222,6 @@ module AxilCache #(
   // the cache never raises any errors
   assign proc.RRESP = `RESP_OK;
   assign proc.BRESP = `RESP_OK;
-
-  // Select correct address bits, depending on type of instruction
-  wire [IndexBits-1:0] imm_index_read, imm_index_write, process_index;
-  wire [TagBits-1:0] imm_tag_in_read, imm_tag_in_write, process_tag_in;
-  wire [BLOCK_SIZE_BITS - 1:0] process_write_data;
-
-  assign imm_index_read  = proc.ARADDR[IndexBits+BlockOffsetBits-1:BlockOffsetBits];
-  assign imm_tag_in_read = proc.ARADDR[TagBits+IndexBits+BlockOffsetBits-1:IndexBits+BlockOffsetBits];
-
-  assign imm_index_write  = proc.AWADDR[IndexBits+BlockOffsetBits-1:BlockOffsetBits];
-  assign imm_tag_in_write = proc.AWADDR[TagBits+IndexBits+BlockOffsetBits-1:IndexBits+BlockOffsetBits];
-
-  logic [IndexBits -1:0] curr_index, fill_index;
-  logic [TagBits-1:0] curr_tag_in, fill_tag_in;
-  logic [BLOCK_SIZE_BITS-1:0] curr_write_data, fill_write_data;
-  logic is_write_operation, fill_write_operation;
   // ------------------------
   // AXI-Lite Signal Summary (with driver annotation)
   // ------------------------
@@ -317,366 +302,362 @@ module AxilCache #(
   // Cache state machine //
   // ------------------- //
 
+  // we define an always_ff block to maintain state
+  // we use an always_comb block to calculate the next state and handle requests
+
   always_ff @(posedge ACLK) begin
-    if (!ARESETn) begin // NB: reset when ARESETn == 0
+    if (!ARESETn) begin
       current_state <= CACHE_AVAILABLE;
-      // Initialize the AXI interface signals
-      proc.ARREADY <= 1'b1;     // Ready to accept read addresses
-      proc.AWREADY <= 1'b1;     // Ready to accept write addresses
-      proc.WREADY <= 1'b1;      // Ready to accept write data
-      proc.RVALID <= 1'b0;      // No read response ready yet
-      proc.RDATA <= 32'b0;      // No read data ready yet
-      proc.BVALID <= 1'b0;      // No write response ready yet
 
-      // Initialize memory interface signals
-      mem.ARVALID <= 1'b0;      // No read request to memory yet
-      mem.AWVALID <= 1'b0;      // No write request to memory yet
-      mem.WVALID <= 1'b0;       // No write data to memory yet
-      mem.RREADY <= 1'b1;       // Ready to accept read responses from memory
-      mem.BREADY <= 1'b1;       // Ready to accept write responses from memory
+      proc.ARREADY <= True;
+      proc.RVALID <= False;
+      proc.RDATA <= 0;
+      proc.AWREADY <= True;
+      proc.WREADY <= True;
+      proc.BVALID <= False;
+
+      mem.ARVALID <= False;
+      mem.ARADDR <= 0;
+      mem.RREADY <= True;
+
+      mem.AWVALID <= False;
+      mem.AWADDR <= 0;
+      mem.WVALID <= False;
+      mem.WDATA <= 0;
+      mem.WSTRB <= 0;
+      mem.BREADY <= False;
     end else begin
-      case (current_state)
-        CACHE_AVAILABLE: begin
-          if (proc.ARVALID && proc.ARREADY && !(proc.RVALID  && !proc.RREADY)) begin
-            buffer_full <= 0;
-            // check for cache hit
-            if (valid[imm_index_read] && (tag[imm_index_read] == imm_tag_in_read)) begin
-              // cache hit, return data
-              proc.RVALID <= 1;
-              proc.RDATA <= data[imm_index_read];
+      current_state <= n_current_state;
 
-              proc.ARREADY <= 1; // ready to accept another request
-              current_state <= CACHE_AWAIT_MANAGER_READY; // move to waiting state to ensure request is accepted
+      proc.ARREADY  <= n_proc_arready;
+      proc.RVALID   <= n_proc_rvalid;
+      proc.RDATA    <= n_proc_rdata;
+      proc.AWREADY  <= n_proc_awready;
+      proc.WREADY   <= n_proc_wready;
+      proc.BVALID   <= n_proc_bvalid;
 
-            end else begin
-              // cache miss, request data from memory
-              curr_index <= imm_index_read;
-              curr_tag_in <= imm_tag_in_read;
-              is_write_operation <= 0; // this is a read operation
-              if (mem.ARREADY) begin
-                mem.ARVALID <= 1;
-                mem.ARADDR <= proc.ARADDR;
-                mem.RREADY <= 1;
-                current_state <= CACHE_AWAIT_FILL_RESPONSE;
-              end else begin
-                current_state <= CACHE_AWAIT_MEMORY_READY;
-              end
-            end
-            // there is still the case of overwriting a dirty block, but we will consider that later
-          end else if (proc.AWVALID && proc.AWREADY) begin
-            // write request from processor
-            // check cache-hit
-            if (valid[imm_index_write] && tag[imm_index_write]== imm_tag_in_write) begin
-              data[imm_index_write] <= proc.WDATA;
-              dirty[imm_index_write] <= 1;
-              proc.BVALID <= 1;
-              current_state <= CACHE_AWAIT_MANAGER_READY;
-            end else begin
-              // we have a cache-miss - if the block is dirty we must wright back to mem.
-              // If it is clean, we only need to adjust the record of what memory is in the cache - because we are overwrighting anyway
-              if (dirty[imm_index_write]) begin
-                // we need to write the dirty block back to memory
-                mem.AWVALID <= 1;
-                mem.AWADDR <= {tag[imm_index_write], imm_index_write, 2'b00}; // address to write back
-                mem.WVALID <= 1; // write data to memory
-                mem.WDATA <= data[imm_index_write]; // data to write back
-                mem.WSTRB <= 4'b1111; // write all bytes
-                mem.BREADY <= 1;
-
-                fill_index <= imm_index_write;
-                fill_tag_in <= imm_tag_in_write;
-                fill_write_data <= proc.WDATA;
-                fill_write_operation <= 1;
-
-                current_state <= CACHE_AWAIT_WRITEBACK_RESPONSE; // wait for writeback response
-              end else begin
-                // we adjust the record of what memory is in the cache and write to cache
-
-                data[imm_index_write] <= proc.WDATA;
-                tag[imm_index_write] <= imm_tag_in_write; // set the tag for the block
-                valid[imm_index_write] <= 1; // mark the tag as valid
-                dirty[imm_index_write] <= 1; // mark the block as dirty
-
-                data[imm_index_write] <= proc.WDATA;
-                dirty[imm_index_write] <= 1;
-                proc.BVALID <= 1; // write response to processor
-                current_state <= CACHE_AWAIT_MANAGER_READY; // wait for manager to accept response
-              end
-            end
-          end
-          proc.ARREADY <= 1; // ready to accept another request
-          proc.AWREADY <= 1;
-          proc.WREADY <= 1;
-        end
-
-        CACHE_AWAIT_FILL_RESPONSE: begin
-          // we are now awaiting a fill response from memory. This is only triggered by an r instruction instruction
-
-          if (mem.RVALID && mem.RREADY) begin
-            // Memory has sent back valid data and we are ready for it
-            mem.RREADY <= 0;
-            data[fill_index] <= mem.RDATA;
-            tag[fill_index] <= fill_tag_in; // set the tag for the block
-            valid[fill_index] <= 1; // mark the tag as valid
-            dirty[fill_index] <= 0; // mark the block as dirty if it was a write operation
-
-            // we will only be waiting for a fill response if it is a read
-            // so we can savely process only a read
-            proc.RVALID <= 1;
-            proc.RDATA <= mem.RDATA;
-            current_state <= CACHE_AWAIT_MANAGER_READY; // wait for manager to accept response
-          end else begin
-            // we are still waiting on memory response
-            // ensure mem-rready is 1
-            mem.RREADY <= 1;
-            current_state <= CACHE_AWAIT_FILL_RESPONSE;
-          end
-
-          // we need to buffer any new requests we get in the meantime
-          if (proc.ARREADY && proc.AWREADY && proc.WREADY) begin
-            if (proc.ARVALID && proc.ARREADY) begin
-              curr_index <= imm_index_read;
-              curr_tag_in <= imm_tag_in_read;
-              is_write_operation <= 0; // this is a read request
-
-              proc.ARREADY <= 0;
-              proc.AWREADY <= 0;
-              proc.WREADY <= 0;
-            end else if (proc.AWVALID && proc.AWREADY) begin
-              curr_index <= imm_index_write;
-              curr_tag_in <= imm_tag_in_write;
-              curr_write_data <= proc.WDATA;
-              is_write_operation <= 1; // this is a write request
-
-              proc.ARREADY <= 0;
-              proc.AWREADY <= 0;
-              proc.WREADY <= 0;
-            end
-          end
-        end
-
-        CACHE_AWAIT_MEMORY_READY: begin
-         //we are waiting to send a memory request
-        //  in initial tests this case isn't relevant
-          current_state <= CACHE_AWAIT_MEMORY_READY;
-        end
-
-        CACHE_AWAIT_FILL_RESPONSE: begin
-          if (mem.RVALID && mem.RREADY) begin
-            // Memory returned data, we can now process the read instruction : note we are only here in the r case
-            data[curr_index] <= mem.RDATA;
-            tag[curr_index] <= curr_tag_in;
-            valid[curr_index] <= 1;
-            dirty[curr_index] <= 0; // new data is not dirty
-
-            // send response to processor
-            proc.RVALID <= 1;
-            proc.RDATA <= mem.RDATA;
-
-            // reset the memory request
-            mem.RREADY <= 0;
-            mem.RVALID <= 0;
-
-            // go back to available state
-            current_state <= CACHE_AWAIT_MANAGER_READY;
-          end else if (mem.RVALID && !mem.RREADY) begin
-            mem.RREADY <= 1; // we are ready to accept the response
-            current_state <= CACHE_AWAIT_FILL_RESPONSE;
-          end else begin
-            // we are still waiting for memory to respond
-            current_state <= CACHE_AWAIT_FILL_RESPONSE;
-          end
-
-          // buffer any requests that are recieved
-        end
-
-        // CACHE_AWAIT_WRITEBACK_RESPONSE: begin
-        //   if (mem.BVALID && mem.BREADY) begin
-        //     // writeback complete, go back to available state
-        //     current_state <= CACHE_AVAILABLE;
-        //   end
-        // end
-
-        CACHE_AWAIT_MANAGER_READY: begin
-          // Read response handshake
-          if (proc.RVALID && proc.RREADY) begin
-              // Manager accepted our read response
-              proc.RVALID <= 0;
-              proc.RDATA <= 0;
-          end else if (proc.BVALID && proc.BREADY) begin
-            if (proc.BREADY) begin
-              proc.BVALID <= 0;
-            end
-          end else begin
-              // we are still waiting on the manager
-              current_state <= CACHE_AWAIT_MANAGER_READY;
-          end
-
-          // if there is a new request and we are ready for it, then either buffer or process it
-          if (proc.ARVALID && proc.ARREADY) begin
-            if ((proc.RVALID && !proc.RREADY) || (proc.BVALID && !proc.BREADY)) begin
-              // We have sent a response but manager has not accepted it. Buffer the new read request.
-              curr_index <= imm_index_read;
-              curr_tag_in <= imm_tag_in_read;
-              current_state <= CACHE_AWAIT_MANAGER_READY; // wait for manager to accept response
-              // we are now unable to accept any new requsts
-              proc.ARREADY <= 0;
-              proc.AWREADY <= 0;
-              proc.WREADY <= 0;
-            end else begin
-              if (valid[imm_index_read] && tag[imm_index_read]== imm_tag_in_read) begin
-                proc.RVALID <= 1;
-                proc.RDATA <= data[imm_index_read];
-                current_state <= CACHE_AWAIT_MANAGER_READY; // wait for manager to accept response
-              end else begin
-                // We have a chache-miss so fill from mem
-                current_state <= CACHE_AWAIT_FILL_RESPONSE;
-                // we need to use the fill-buffer
-                fill_index <= imm_index_read;
-                fill_tag_in <= imm_tag_in_read;
-                fill_write_data <= 0;
-                fill_write_operation <= 0;
-
-                if (dirty[imm_index_read]) begin
-                  mem.AWVALID <= 1;
-                  mem.AWADDR <= {tag[imm_index_read],imm_index_read, 2'b00};
-                  mem.WVALID <= 1; // write data to memory
-                  mem.WDATA <= data[imm_index_read]; // data to write back
-                  mem.WSTRB <= 4'b1111; // write all bytes
-                  mem.BREADY <= 1;
-                  current_state <= CACHE_AWAIT_WRITEBACK_RESPONSE; // wait for writeback response
-                end else begin current_state <= CACHE_AWAIT_FILL_RESPONSE; end
-              end
-            end
-          end else if (proc.AWVALID && proc.AWREADY) begin
-            if ((proc.RVALID && !proc.RREADY) || (proc.BVALID && !proc.BREADY)) begin
-              // We have sent a response but manager has not accepted it. Buffer the new read request.
-              curr_index <= imm_index_write;
-              curr_tag_in <= imm_tag_in_write;
-              curr_write_data <= proc.WDATA;
-              current_state <= CACHE_AWAIT_MANAGER_READY; // wait for manager to accept response
-              // we are now unable to accept any new requsts
-              proc.ARREADY <= 0;
-              proc.AWREADY <= 0;
-              proc.WREADY <= 0;
-            end else begin
-              // write request from processor
-              // check cache-hit
-              if (valid[imm_index_write] && tag[imm_index_write]== imm_tag_in_write) begin
-                data[imm_index_write] <= proc.WDATA;
-                dirty[imm_index_write] <= 1;
-                proc.BVALID <= 1;
-                current_state <= CACHE_AWAIT_MANAGER_READY;
-              end else begin
-                // we have a cache-miss - if the block is dirty we must wright back to mem.
-                // If it is clean, we only need to adjust the record of what memory is in the cache - because we are overwrighting anyway
-                if (dirty[imm_index_write]) begin
-                  // we need to write the dirty block back to memory
-                  mem.AWVALID <= 1;
-                  mem.AWADDR <= {tag[imm_index_write], imm_index_write, 2'b00}; // address to write back
-                  mem.WVALID <= 1; // write data to memory
-                  mem.WDATA <= data[imm_index_write]; // data to write back
-                  mem.WSTRB <= 4'b1111; // write all bytes
-                  mem.BREADY <= 1;
-
-                  fill_index <= imm_index_write;
-                  fill_tag_in <= imm_tag_in_write;
-                  fill_write_data <= proc.WDATA;
-                  fill_write_operation <= 1;
-
-                  current_state <= CACHE_AWAIT_WRITEBACK_RESPONSE; // wait for writeback response
-                end else begin
-                  // we adjust the record of what memory is in the cache and write to cache
-                  data[imm_index_write] <= proc.WDATA;
-                  tag[imm_index_write] <= imm_tag_in_write; // set the tag for the block
-                  valid[imm_index_write] <= 1; // mark the tag as valid
-                  dirty[imm_index_write] <= 1; // mark the block as dirty
-
-                  data[imm_index_write] <= proc.WDATA;
-                  dirty[imm_index_write] <= 1;
-                  proc.BVALID <= 1; // write response to processor
-                  current_state <= CACHE_AWAIT_MANAGER_READY; // wait for manager to accept response
-                end
-              end
-            end
-          end else if (!proc.ARREADY && !proc.AWREADY && !proc.WREADY) begin
-            // We are not ready to accept any new requests - if manager responded we process buffered request
-            if ((proc.RVALID && proc.RREADY) || (proc.BVALID && proc.BREADY)) begin
-              // Manager accepted our response, we process buffered instruction
-              if (is_write_operation) begin
-                // write request from processor
-                // check cache-hit
-                if (valid[curr_index] && tag[curr_index]== curr_tag_in) begin
-                  data[curr_index] <= curr_write_data;
-                  dirty[curr_index] <= 1;
-                  proc.BVALID <= 1;
-                  current_state <= CACHE_AWAIT_MANAGER_READY;
-                end else begin
-                  // we have a cache-miss - if the block is dirty we must wright back to mem.
-                  // If it is clean, we only need to adjust the record of what memory is in the cache - because we are overwrighting anyway
-                  if (dirty[curr_index]) begin
-                    // we need to write the dirty block back to memory
-                    mem.AWVALID <= 1;
-                    mem.AWADDR <= {tag[curr_index], curr_index, 2'b00}; // address to write back
-                    mem.WVALID <= 1; // write data to memory
-                    mem.WDATA <= data[curr_index]; // data to write back
-                    mem.WSTRB <= 4'b1111; // write all bytes
-                    mem.BREADY <= 1;
-
-                    fill_index <= curr_index;
-                    fill_tag_in <= curr_tag_in;
-                    fill_write_data <= proc.WDATA;
-                    fill_write_operation <= 1;
-
-                    current_state <= CACHE_AWAIT_WRITEBACK_RESPONSE; // wait for writeback response
-                  end else begin
-                    // we adjust the record of what memory is in the cache and write to cache
-                    data[curr_index] <= proc.WDATA;
-                    tag[curr_index] <= curr_tag_in; // set the tag for the block
-                    valid[curr_index] <= 1; // mark the tag as valid
-                    dirty[curr_index] <= 1; // mark the block as dirty
-
-                    data[curr_index] <= proc.WDATA;
-                    dirty[curr_index] <= 1;
-                    proc.BVALID <= 1; // write response to processor
-                    current_state <= CACHE_AWAIT_MANAGER_READY; // wait for manager to accept response
-                  end
-                end
-              end else begin
-                // cache hit assumed, return data
-                proc.RVALID <= 1;
-                proc.RDATA <= data[curr_index];
-              end
-              // reset the buffer
-              curr_index <= 0;
-              curr_tag_in <= 0;
-              curr_write_data <= 0;
-
-              proc.ARREADY <= 1; // ready to accept another request
-              proc.AWREADY <= 1;
-              proc.WREADY <= 1;
-              // go back to waiting for manager to accept response
-              current_state <= CACHE_AWAIT_MANAGER_READY;
-            end else begin
-              current_state <= CACHE_AWAIT_MANAGER_READY; // wait for manager to accept response
-            end
-          end else begin
-            // No new request and we had no buffered requests we go back to
-            // normal state iff proc accepted return
-            if ((proc.RVALID && proc.RREADY)|| (proc.BVALID && proc.BREADY)) begin
-              current_state <= CACHE_AVAILABLE;
-            end
-          end
-        end
-
-        default: begin
-          current_state <= CACHE_AVAILABLE; // reset to available on any unknown state.
-        end
-
-      endcase // case (current_state)
-    end // else: !if(!ARESETn)
+      mem.ARVALID   <= n_mem_arvalid;
+      mem.ARADDR    <= n_mem_araddr;
+      mem.RREADY   <= n_mem_rready;
+      mem.AWVALID   <= n_mem_awvalid;
+      mem.AWADDR    <= n_mem_awaddr;
+      mem.WVALID    <= n_mem_wvalid;
+      mem.WDATA     <= n_mem_wdata;
+      mem.BREADY   <= n_mem_bready;
+    end
   end // always_ff
 
+  // define next_state variables
+  cache_state_t n_current_state;
+  logic [BLOCK_SIZE_BITS-1:0] n_proc_rdata, n_mem_araddr, n_mem_awaddr, n_mem_wdata;
+  logic n_proc_arready, n_proc_rvalid, n_proc_awready, n_proc_wready, n_proc_bvalid;
+
+  logic n_mem_arvalid, n_mem_rready, n_mem_bready, n_mem_awvalid, n_mem_wvalid;
+  // define internal signals
+
+
+  // Select correct address bits, depending on type of instruction
+  wire [IndexBits-1:0] imm_index_read, imm_index_write, process_index;
+  wire [TagBits-1:0] imm_tag_in_read, imm_tag_in_write, process_tag_in;
+  wire [BLOCK_SIZE_BITS - 1:0] process_write_data;
+
+  assign imm_index_read  = proc.ARADDR[IndexBits+BlockOffsetBits-1:BlockOffsetBits];
+  assign imm_tag_in_read = proc.ARADDR[TagBits+IndexBits+BlockOffsetBits-1:IndexBits+BlockOffsetBits];
+
+  assign imm_index_write  = proc.AWADDR[IndexBits+BlockOffsetBits-1:BlockOffsetBits];
+  assign imm_tag_in_write = proc.AWADDR[TagBits+IndexBits+BlockOffsetBits-1:IndexBits+BlockOffsetBits];
+
+  logic [IndexBits -1:0]      s_index_buffer, n_index_buffer, f_index_buffer, nf_index_buffer;
+  logic [TagBits-1:0]         s_tag_buffer,   n_tag_buffer,   f_tag_buffer,   nf_tag_buffer;
+  logic [BLOCK_SIZE_BITS-1:0] s_wdata_buffer, n_wdata_buffer, f_wdata_buffer, nf_wdata_buffer;
+  logic [3:0]                 s_wstrb_buffer, n_wstrb_buffer, f_wstrb_buffer, nf_wstrb_buffer;
+  logic                       s_write,        n_write,        f_write,        nf_write;
+
+  logic we, wf_mem;
+  logic [BLOCK_SIZE_BITS-1:0] data_out;
+  logic [IndexBits-1:0] index_out;
+  logic [3:0] wstrb_out;
+  logic [TagBits-1:0] tag_out;
+
+  // write to registers
+  always_ff @(posedge ACLK) begin
+    if (we) begin
+      case (wstrb_out)
+        4'b0001: data[index_out][7:0] <= data_out[7:0];
+        4'b0010: data[index_out][15:8] <= data_out[15:8];
+        4'b0100: data[index_out][23:16] <= data_out[23:16];
+        4'b1000: data[index_out][31:24] <= data_out[31:24];
+        4'b0011: data[index_out][15:0] <= data_out[15:0];
+        4'b1100: data[index_out][31:16] <= data_out[31:16];
+        4'b1111: data[index_out] <= data_out;
+        default: begin end
+      endcase
+      if (wf_mem) begin
+        //block is from memory
+        tag[index_out] <= tag_out;
+        valid[index_out] <= True;
+        dirty[index_out] <= False;
+      end else begin
+        dirty[index_out] <= True;
+      end
+    end
+  end
+
+  // update buffers
+  always_ff @(posedge ACLK) begin
+    if (!ARESETn) begin
+      s_index_buffer <= 0;
+      s_tag_buffer <= 0;
+      s_wdata_buffer <= 0;
+      s_wstrb_buffer <= 0;
+      s_write <= 0;
+
+      f_index_buffer <= 0;
+      f_tag_buffer <= 0;
+      f_wdata_buffer <= 0;
+      f_wstrb_buffer <= 0;
+      f_write <= 0;
+    end else begin
+      s_index_buffer <= n_index_buffer;
+      s_tag_buffer <= n_tag_buffer;
+      s_wdata_buffer <= n_wdata_buffer;
+      s_wstrb_buffer <= n_wstrb_buffer;
+      s_write <= n_write;
+
+      f_index_buffer <= nf_index_buffer;
+      f_tag_buffer <= nf_tag_buffer;
+      f_wdata_buffer <= nf_wdata_buffer;
+      f_wstrb_buffer <= nf_wstrb_buffer;
+      f_write <= nf_write;
+    end
+  end
+
+  always_comb begin
+    // default values for all outputs
+    n_current_state = current_state;
+    n_proc_arready = proc.ARREADY;
+    n_proc_rvalid = proc.RVALID;
+    n_proc_rdata = proc.RDATA;
+    n_proc_awready = proc.AWREADY;
+    n_proc_wready = proc.WREADY;
+    n_proc_bvalid = proc.BVALID;
+
+    we = 0;
+    wf_mem = 0;
+    // case on current state
+    case (current_state)
+      CACHE_AVAILABLE: begin
+        n_proc_arready = True;
+        n_proc_awready = True;
+        n_proc_wready = True;
+        // in this state we have no buffered requests - we respond to any incoming request
+        if (proc.ARVALID && proc.ARREADY) begin
+          if (valid[imm_index_read] && tag[imm_index_read] == imm_tag_in_read) begin
+            // cache hit
+            n_proc_rvalid = True;
+            n_proc_rdata = data[imm_index_read];
+            n_current_state = CACHE_AWAIT_MANAGER_READY;
+          end
+        end else if (proc.AWVALID && proc.WVALID && proc.ARREADY) begin
+          // cache hit
+          if (valid[imm_index_write] && tag[imm_index_write] == imm_tag_in_write) begin
+            // cache hit
+            we = 1;
+            data_out = proc.WDATA;
+            index_out = imm_index_write;
+            wstrb_out = proc.WSTRB;
+
+            n_proc_bvalid = True;
+            n_current_state = CACHE_AWAIT_MANAGER_READY;
+          end
+        end else begin
+          n_current_state = CACHE_AVAILABLE;
+        end
+      end
+
+      CACHE_AWAIT_FILL_RESPONSE: begin
+        if (mem.RVALID && mem.RREADY) begin
+          // process incoming response
+          if (f_write) begin
+            case (f_wstrb_buffer)
+              4'b0001: data_out = {mem.RDATA[31:8], f_wdata_buffer[7:0]};
+              4'b0010: data_out = {mem.RDATA[31:16], f_wdata_buffer[15:8], mem.RDATA[7:0]};
+              4'b0100: data_out = {mem.RDATA[31:24], f_wdata_buffer[23:16], mem.RDATA[15:0]};
+              4'b1000: data_out = {f_wdata_buffer[31:24], mem.RDATA[23:0]};
+              4'b0011: data_out = {mem.RDATA[31:16], f_wdata_buffer[15:0]};
+              4'b1100: data_out = {f_wdata_buffer[31:16], mem.RDATA[15:0]};
+              4'b1111: data_out = f_wdata_buffer;
+              default: begin data_out = {mem.RDATA[31:8], f_wdata_buffer[7:0]}; end
+            endcase
+            n_proc_bvalid = True;
+          end else begin
+            data_out = mem.RDATA;
+            n_proc_rvalid = True;
+            n_proc_rdata = mem.RDATA;
+          end
+          index_out = f_index_buffer;
+          tag_out = f_tag_buffer;
+          wstrb_out = 4'b1111;
+          we = 1;
+          wf_mem = 1;
+
+          n_current_state = CACHE_AWAIT_MANAGER_READY;
+        end else begin
+          n_mem_rready = True;
+          n_current_state = CACHE_AWAIT_FILL_RESPONSE;
+        end
+        // buffer any instructions recieved this cycle
+        if (proc.ARVALID && proc.ARREADY) begin
+          n_index_buffer = imm_index_read;
+          n_tag_buffer = imm_tag_in_read;
+          n_wdata_buffer = 0;
+          n_wstrb_buffer = 0;
+          n_write = 0;
+          // we are now unable to accept any new requsts
+          n_proc_arready = False;
+          n_proc_awready = False;
+          n_proc_wready = False;
+        end else if (proc.AWVALID && proc.WVALID && proc.ARREADY) begin
+          // process incoming response
+          n_index_buffer = imm_index_write;
+          n_tag_buffer = imm_tag_in_write;
+          n_wdata_buffer = proc.WDATA;
+          n_wstrb_buffer = proc.WSTRB;
+          n_write = 1;
+          // we are now unable to accept any new requsts
+          n_proc_arready = False;
+          n_proc_awready = False;
+          n_proc_wready = False;
+        end
+      end
+
+      CACHE_AWAIT_MANAGER_READY: begin
+        if (proc.RVALID && proc.RREADY) begin
+          n_proc_rvalid = 0;
+          n_proc_rdata = 0;
+        end else if (proc.BVALID && proc.BREADY) begin
+          n_proc_bvalid = 0;
+        end else begin
+          n_current_state = CACHE_AWAIT_MANAGER_READY;
+        end
+
+        if (proc.ARVALID && proc.ARREADY) begin
+          if ((proc.RVALID && !proc.RREADY) || (proc.BVALID && !proc.BREADY)) begin
+              // We have sent a response but manager has not accepted it. Buffer the new read request.
+              n_index_buffer = imm_index_read;
+              n_tag_buffer = imm_tag_in_read;
+              n_wdata_buffer = 0;
+              n_wstrb_buffer = 0;
+              n_write = 0;
+              // we are now unable to accept any new requsts
+              n_proc_arready = False;
+              n_proc_awready = False;
+              n_proc_wready = False;
+              n_current_state = CACHE_AWAIT_MANAGER_READY;
+          end else begin
+            if (valid[imm_index_read] && tag[imm_index_read] == imm_tag_in_read) begin
+              // cache hit
+              n_proc_rvalid = True;
+              n_proc_rdata = data[imm_index_read];
+              n_current_state = CACHE_AWAIT_MANAGER_READY;
+            end else begin
+              // cache miss - fetch from mem, if replacing a dirty block, we must writeback
+              if (dirty[imm_index_read]) begin end else begin
+                //request block from memory
+                n_mem_arvalid = True;
+                n_mem_araddr = {imm_tag_in_read, imm_index_read, 2'b00};
+                n_mem_rready = True;
+
+                //fill buffer
+                nf_index_buffer = imm_index_read;
+                nf_tag_buffer = imm_tag_in_read;
+                nf_write = 0;
+                n_current_state = CACHE_AWAIT_FILL_RESPONSE;
+              end
+            end
+          end
+        end else if (proc.AWVALID && proc.AWREADY && proc.WVALID && proc.WREADY) begin
+          // process incoming response
+          if ((proc.RVALID && !proc.RREADY) || (proc.BVALID && !proc.BREADY)) begin
+            // We have sent a response but manager has not accepted it. Buffer the new write request.
+            n_index_buffer = imm_index_write;
+            n_tag_buffer = imm_tag_in_write;
+            n_wdata_buffer = proc.WDATA;
+            n_wstrb_buffer = proc.WSTRB;
+            n_write = 1;
+            // we are now unable to accept any new requsts
+            n_proc_arready = False;
+            n_proc_awready = False;
+            n_proc_wready = False;
+
+            n_current_state = CACHE_AWAIT_MANAGER_READY;
+          end else begin
+            // cache hit
+            if (valid[imm_index_write] && tag[imm_index_write] == imm_tag_in_write) begin
+              // cache hit
+              we = 1;
+              data_out = proc.WDATA;
+              index_out = imm_index_write;
+              wstrb_out = proc.WSTRB;
+
+              n_proc_bvalid = True;
+              n_current_state = CACHE_AWAIT_MANAGER_READY;
+            end
+          end
+        end else if (!proc.ARREADY && !proc.AWREADY && !proc.WREADY) begin
+          // we are unable to accept new responses => we have a buffered request
+          if ((proc.RVALID && !proc.RREADY) || (proc.BVALID && !proc.BREADY)) begin
+            //still waiting for manager - maintain the buffers
+            n_index_buffer = s_index_buffer;
+            n_tag_buffer = s_tag_buffer;
+            n_wdata_buffer = s_wdata_buffer;
+            n_wstrb_buffer = s_wstrb_buffer;
+            n_write = s_write;
+
+            n_proc_arready = False;
+            n_proc_awready = False;
+            n_proc_wready = False;
+
+            n_current_state = CACHE_AWAIT_MANAGER_READY;
+          end else begin
+            //manager accepted response - process buffered request
+            if (s_write) begin
+              // process incoming response
+              we = 1;
+              data_out = s_wdata_buffer;
+              index_out = s_index_buffer;
+              wstrb_out = s_wstrb_buffer;
+
+              n_proc_bvalid = True;
+            end else begin
+              if (valid[s_index_buffer] && tag[s_index_buffer] == s_tag_buffer) begin
+                // cache hit
+                n_proc_rvalid = True;
+                n_proc_rdata = data[s_index_buffer];
+              end
+            end
+            n_current_state = CACHE_AWAIT_MANAGER_READY;
+            //zero the buffers
+            n_index_buffer = 0;
+            n_tag_buffer = 0;
+            n_wdata_buffer = 0;
+            n_wstrb_buffer = 0;
+            n_write = 0;
+
+            n_proc_arready = True;
+            n_proc_awready = True;
+            n_proc_wready = True;
+          end
+        end else begin
+          // no buffered request, no incoming request - if manager is ready, we are now cache available
+          if ((proc.RVALID && proc.RREADY) || (proc.BVALID && proc.BREADY)) begin
+            n_current_state = CACHE_AVAILABLE;
+          end
+        end
+      end
+      default: begin end
+    endcase
+  end
 endmodule // AxilCache
 
 `ifndef SYNTHESIS
