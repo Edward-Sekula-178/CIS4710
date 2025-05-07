@@ -99,6 +99,7 @@ typedef struct packed {
   logic [`REG_SIZE] data_2;
 
   logic [7:0] insn_ic;
+  logic [6:0] opcode;
 } stage_execute_t;
 
 typedef struct packed {
@@ -167,45 +168,24 @@ module DatapathPipelined (
   /***************/
   /* FETCH STAGE */
   /***************/
-
-  logic [`REG_SIZE] f_pc_current, f_pc_next;
+  logic [`REG_SIZE] f_pc_current, x_branch_pc;
   wire [`REG_SIZE] f_insn;
   cycle_status_e f_cycle_status;
 
-  // program counter
-  always_comb begin
-    if (rst) begin
-      f_cycle_status = CYCLE_NO_STALL;
-    end else if (x_branch) begin
-      f_cycle_status = CYCLE_TAKEN_BRANCH;
-    end else begin
-      f_cycle_status = CYCLE_NO_STALL;
-    end
-  end
-
-  logic f_div_stall_next, f_div_stall_curr;
-  logic f_load_stall_next, f_load_stall_curr;
-
-  logic f_fence;
-
+  // program_counter
   always_ff @(posedge clk) begin
+    f_cycle_status <= CYCLE_NO_STALL;
     if (rst) begin
       f_pc_current <= 32'd0;
-      f_div_stall_curr <= 1'b0;
-      f_load_stall_curr <= 1'b0;
-      m_grab_div_curr <= 1'b0;
-    end else if (f_fence || f_div_stall_next || f_load_stall_next) begin
+    end else if (x_branch) begin
+      f_pc_current <= x_branch_pc;
+    end else if (f_fence || load_stall || div_stall) begin //stall the pc
       f_pc_current <= f_pc_current;
-      f_div_stall_curr <= f_div_stall_next;
-      f_load_stall_curr <= f_load_stall_next;
-      m_grab_div_curr <= m_grab_div_next;
     end else begin
-      f_pc_current <= f_pc_next;
-      f_div_stall_curr <= f_div_stall_next;
-      f_load_stall_curr <= f_load_stall_next;
-      m_grab_div_curr <= m_grab_div_next;
+      f_pc_current <= f_pc_current + 4;
     end
   end
+
   // send PC to imem
   assign pc_to_imem = f_pc_current;
   assign f_insn = x_branch ? 32'd0 : insn_from_imem;
@@ -239,7 +219,7 @@ module DatapathPipelined (
         insn: f_insn,
         cycle_status:CYCLE_TAKEN_BRANCH
       };
-    end else if (f_div_stall_next || f_load_stall_next || f_fence) begin
+    end else if (div_stall || load_stall || f_fence) begin
       decode_state <= decode_state;
     end else begin
         decode_state <= '{
@@ -472,6 +452,7 @@ always_comb begin
   else begin d_ic = ICIllegal; end
 end
 
+  logic f_fence;
   always_comb begin
     if((d_ic == ICfence)&&(x_store || m_store)) begin f_fence = 1; end
     else begin f_fence = 0; end
@@ -495,9 +476,10 @@ end
         imm_j_sext:0,
         data_1:0,
         data_2:0,
-        insn_ic:0
+        insn_ic:0,
+        opcode: 0
       };
-    end else if (f_div_stall_next || f_load_stall_next)  begin
+    end else if (div_stall || load_stall)  begin
       x_state <= x_state;
     end else begin
         x_state <= '{
@@ -511,7 +493,8 @@ end
           imm_j_sext: (x_branch) ? 0 : d_imm_j_sext,
           data_1: (wd_bypass_rs1) ? w_state.rd_data : 0,
           data_2: (wd_bypass_rs2) ? w_state.rd_data : 0,
-          insn_ic: (x_branch) ? 0 : d_ic
+          insn_ic: (x_branch) ? 0 : d_ic,
+          opcode: (x_branch) ? 0 : d_insn_opcode
         };
     end
   end
@@ -527,8 +510,6 @@ end
   logic x_branch;
   logic x_con_insn_div;
   logic d_con_insn_div;
-  logic m_grab_div_curr, m_grab_div_next, m_bubble_curr, m_bubble_next;
-  logic [2:0] x_cycle_count, m_grab_div_count, m_bubble_count;
 
   // If the current X instruction is div
   assign x_con_insn_div = (x_state.insn_ic == ICdiv) | (x_state.insn_ic == ICdivu) |
@@ -536,44 +517,7 @@ end
   // If the current D instruction is div
   assign d_con_insn_div = (d_ic == ICdiv) | (d_ic == ICdivu) |
                       (d_ic == ICrem) | (d_ic == ICremu);
-  // If we need to stall the pipeline i.e. if we don't have independent divs
-  assign f_div_stall_next = (x_con_insn_div && d_con_insn_div && (d_insn_rs1 != x_rd) && (d_insn_rs2 != x_rd)) ?
-                            0 : (x_con_insn_div && x_cycle_count!=3'd7);
-  // We define grab div logic
-  assign m_grab_div_next = d_con_insn_div | (m_grab_div_curr && m_grab_div_count != 7);
 
-  // assign m_bubble_next = x_con_insn_div | (m_bubble_curr && m_bubble_count != 7);
-
-  always @(posedge clk) begin
-    if (rst) begin
-      x_cycle_count <= 3'd0;
-    end else if (f_div_stall_next) begin
-      if (x_cycle_count == 3'd7)
-        x_cycle_count <= 3'd0;
-      else
-        x_cycle_count <= x_cycle_count + 3'd1;
-    end else begin
-      x_cycle_count <= 3'd0;
-    end
-
-    // if (rst) begin
-    //   m_bubble_count <= 3'd0;
-    // end else if (m_bubble_next) begin
-    //   if (m_bubble_count == 3'd7)
-    //     m_bubble_count <= 3'd0;
-    //   else
-    //     m_bubble_count <= m_bubble_count + 3'd1;
-    // end else begin
-    //   m_bubble_count <= 3'd0;
-    // end
-
-    if(rst) begin m_grab_div_count <= 0; end
-    else if (d_con_insn_div) begin m_grab_div_count <= 0; end
-    else if (m_grab_div_next) begin
-      if (m_grab_div_count == 7) begin m_grab_div_count <= 0; end
-      else begin m_grab_div_count <= m_grab_div_count + 1; end
-    end else begin m_grab_div_count <=0; end
-  end
 
   // modules
   DividerUnsignedPipelined divider(.clk(clk),.rst(rst),.stall(1'b0),
@@ -614,43 +558,11 @@ end
     if (mx_bypass_rs2) begin x_d_2 = m_state.rd_data; end
   end
 
-  logic x_store;
   always_comb begin
-    if(x_state.insn_ic == ICsw || x_state.insn_ic == ICsb || x_state.insn_ic == ICsh) begin x_store = 1; end
-    else begin x_store = 0; end
-  end
-  logic m_store;
-  always_comb begin
-    if(m_state.insn_ic == ICsw || m_state.insn_ic == ICsb || m_state.insn_ic == ICsh) begin m_store = 1; end
-    else begin m_store = 0; end
-  end
-  logic m_load;
-  always_comb begin
-    if(m_state.insn_ic == IClw ||  m_state.insn_ic == IClb || m_state.insn_ic == IClh
-              || m_state.insn_ic == IClhu|| m_state.insn_ic == IClbu) begin m_load = 1; end
-    else begin m_load = 0; end
-  end
-
-  always_comb begin
-
-    // load stall control
-    if (m_load) begin
-      if(x_store) begin
-        if(m_rd == x_rs1 && x_req_rs1) begin f_load_stall_next = (f_load_stall_curr == 1'b0) ? 1'b1 : 1'b0; end
-        else begin f_load_stall_next = 1'b0; end
-      end else begin
-        if(m_rd == x_rs1 && x_req_rs1) begin f_load_stall_next = (f_load_stall_curr == 1'b0) ? 1'b1 : 1'b0; end
-        else if (m_rd == x_rs2 && x_req_rs2) begin f_load_stall_next = (f_load_stall_curr == 1'b0) ? 1'b1 : 1'b0; end
-        else begin f_load_stall_next = 1'b0; end
-      end
-    end else begin f_load_stall_next = 1'b0; end
-
-    // control vars
-    f_pc_next = f_pc_current + 4;
-
     x_rd_data = 32'd00;
 
     x_branch = 1'b0;
+    x_branch_pc = 32'd0;
 
     a = 32'b0;
     b = 32'b0;
@@ -734,32 +646,32 @@ end
       /*branching*/
       ICbeq: begin
         if (x_d_1 == x_d_2)begin
-          f_pc_next = x_state.pc + x_state.imm_b_sext;
+          x_branch_pc = x_state.pc + x_state.imm_b_sext;
           x_branch = 1;
         end
       end ICbne: begin
         if (x_d_1 != x_d_2)begin
-          f_pc_next = x_state.pc + x_state.imm_b_sext;
+          x_branch_pc = x_state.pc + x_state.imm_b_sext;
           x_branch = 1;
         end
       end ICblt: begin
         if ($signed(x_d_1) < $signed(x_d_2))begin
-          f_pc_next = x_state.pc + x_state.imm_b_sext;
+          x_branch_pc = x_state.pc + x_state.imm_b_sext;
           x_branch = 1;
         end
       end ICbge: begin
         if ($signed(x_d_1) >= $signed(x_d_2))begin
-          f_pc_next = x_state.pc + x_state.imm_b_sext;
+          x_branch_pc = x_state.pc + x_state.imm_b_sext;
           x_branch = 1;
         end
       end ICbltu: begin
         if (x_d_1 < $unsigned(x_d_2))begin
-          f_pc_next = x_state.pc + x_state.imm_b_sext;
+          x_branch_pc = x_state.pc + x_state.imm_b_sext;
           x_branch = 1;
         end
       end ICbgeu: begin
         if (x_d_1 >= $unsigned(x_d_2))begin
-          f_pc_next = x_state.pc + x_state.imm_b_sext;
+          x_branch_pc = x_state.pc + x_state.imm_b_sext;
           x_branch = 1;
         end
       end
@@ -767,11 +679,11 @@ end
       // JAL JALR
       ICjal: begin
         x_rd_data = x_state.pc + 32'd4;
-        f_pc_next = x_state.pc + x_state.imm_j_sext;
+        x_branch_pc = x_state.pc + x_state.imm_j_sext;
         x_branch = 1;
       end ICjalr: begin
         x_rd_data = x_state.pc + 32'd4;
-        f_pc_next = (x_d_1 + x_state.imm_i_sext) & ~1;
+        x_branch_pc = (x_d_1 + x_state.imm_i_sext) & ~1;
         x_branch = 1;
       end
 
@@ -822,13 +734,11 @@ end
         x_data_dmem = x_d_2;
       end ICsh: begin
         x_memory_address = (x_d_1 + x_state.imm_s_sext);
-        cin = 1'b0;
         x_data_dmem = x_d_2;
       end ICsb: begin
         a = x_d_1;
         b = x_state.imm_s_sext;
         x_memory_address = sum;
-        cin = 0;
         x_data_dmem = x_d_2;
       end
 
@@ -914,7 +824,7 @@ end
         data_dmem:0,
         insn_ic:0
       };
-     end else if (m_grab_div_curr) begin
+     end else if (div_stall) begin
       m_state <= '{
         pc: div_pc,
         insn: div_insn,
@@ -925,11 +835,11 @@ end
         data_dmem: 0,
 
         insn_ic: div_insn_ic
-      };end else if (f_div_stall_next || f_load_stall_next) begin
+      };end else if (div_stall || load_stall) begin
       m_state <= '{
         pc: 0,
         insn: 0,
-        cycle_status: f_load_stall_next ? CYCLE_LOAD2USE : CYCLE_DIV2USE,
+        cycle_status: load_stall ? CYCLE_LOAD2USE : CYCLE_DIV2USE,
         rd_data:0,
         memory_address:0,
         data_dmem:0,
@@ -982,6 +892,8 @@ end
 
     store_data_to_dmem = 32'd0;
     store_we_to_dmem = 4'b0000;
+
+    m_rd_data = 32'd0;
 
     case (m_state.insn_ic)
       IClw: begin
@@ -1124,6 +1036,83 @@ end
   end
 
   assign halt = (m_state.insn[6:0] == 7'h73) & (m_state.insn[31:7] == 'b0);
+
+    /******************/
+    /* STALL HANDLING */
+    /******************/
+
+
+  // always @(posedge clk) begin
+  //   if (rst) begin
+  //     x_cycle_count <= 3'd0;
+  //   end else if (div_stall) begin
+  //     if (x_cycle_count == 3'd7)
+  //       x_cycle_count <= 3'd0;
+  //     else
+  //       x_cycle_count <= x_cycle_count + 3'd1;
+  //   end else begin
+  //     x_cycle_count <= 3'd0;
+  //   end
+
+  //   if(rst) begin m_grab_div_count <= 0; end
+  //   else if (d_con_insn_div) begin m_grab_div_count <= 0; end
+  //   else if (m_grab_div_next) begin
+  //     if (m_grab_div_count == 7) begin m_grab_div_count <= 0; end
+  //     else begin m_grab_div_count <= m_grab_div_count + 1; end
+  //   end else begin m_grab_div_count <=0; end
+  // end
+
+    logic div_stall;
+    logic [2:0] div_cycle_count_front, div_cycle_count_back;
+
+    assign div_stall = x_con_insn_div && (~d_con_insn_div ||
+                      (x_rd == d_insn_rs1 || x_rd == d_insn_rs2))
+                      && div_cycle_count_front != 0;
+
+    // div cycle counter
+    always_ff @(posedge clk) begin
+      div_cycle_count_front <= div_cycle_count_front;
+      div_cycle_count_back <= div_cycle_count_back;
+      if (rst) begin
+        div_cycle_count_back <= 0;
+        div_cycle_count_front <= 0;
+      end else begin
+        if (d_con_insn_div || x_con_insn_div) begin
+          div_cycle_count_back <= div_cycle_count_back + 1;
+        end else begin
+          div_cycle_count_back <= 0;
+        end
+        // New divide instruction issued
+        if (div_stall) begin
+          div_cycle_count_front <= div_cycle_count_front + 1;
+        end else if (d_con_insn_div) begin
+          div_cycle_count_front <= 1;
+        end
+      end
+    end
+
+    logic load_stall;
+    logic x_store, x_load, m_store, m_load;
+    always_comb begin
+      x_load = 0;
+      x_store = 0;
+      m_store = 0;
+      m_load = 0;
+      if (x_state.opcode == OpLoad) begin x_load = 1; end
+      if (x_state.opcode == OpStore) begin x_store = 1; end
+      if(m_state.insn_ic == ICsw || m_state.insn_ic == ICsb || m_state.insn_ic == ICsh) begin m_store = 1; end
+      if(m_state.insn_ic == IClw ||  m_state.insn_ic == IClb || m_state.insn_ic == IClh
+                || m_state.insn_ic == IClhu|| m_state.insn_ic == IClbu) begin m_load = 1; end
+    end
+
+    always_comb begin
+        load_stall = 0;
+        if (m_load) begin
+          if(m_rd == x_rs1 && x_req_rs1) begin load_stall = 1; end
+          else if (m_rd == x_rs2 && x_req_rs2) begin load_stall = 1; end
+        end
+    end
+
 
     /*****************/
     /* BYPASS HANDLE */

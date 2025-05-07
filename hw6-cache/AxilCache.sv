@@ -1,7 +1,29 @@
 `timescale 1ns / 1ns
 
+// REFERENCE CODE
+
 `define ADDR_WIDTH 32
 `define DATA_WIDTH 32
+
+/** encode a 1-hot signal into binary */
+module encoder #(
+    parameter int INPUT_WIDTH
+) (
+    input  logic [INPUT_WIDTH-1:0] one_hot,
+    output logic [1 == INPUT_WIDTH ? 0 : $clog2(INPUT_WIDTH)-1:0] binary
+);
+    always_comb begin
+`ifndef SYNTHESIS
+        assert (1 == INPUT_WIDTH || $onehot(one_hot)) else $error("Input is not 1-hot encoded!");
+`endif
+        binary = '0; // Default value
+        for (int i = 0; i < INPUT_WIDTH; i++) begin
+            if (one_hot[i]) begin
+                binary = i[1 == INPUT_WIDTH ? 0 : $clog2(INPUT_WIDTH)-1:0];
+            end
+        end
+    end
+endmodule
 
 interface axi_if #(
       parameter int ADDR_WIDTH = 32
@@ -52,6 +74,10 @@ module AxilMemory #(
 ) (
     input wire ACLK,
     input wire ARESETn,
+`ifdef RISCV_FORMAL
+    input wire [`DATA_WIDTH] random_insn,
+    input wire [`DATA_WIDTH] random_data,
+`endif
     axi_if.subord port_ro,
     axi_if.subord port_rw
 );
@@ -60,15 +86,17 @@ module AxilMemory #(
   localparam int AddrLsb = 2;  // since memory elements are 4B
   localparam int AddrMsb = $clog2(NUM_WORDS) + AddrLsb - 1;
 
+`ifndef RISCV_FORMAL
   logic [31:0] mem_array[NUM_WORDS];
+`endif
   logic [31:0] ro_araddr;
   logic ro_araddr_valid;
 
-  initial begin
 `ifdef SYNTHESIS
-    $readmemh("mem_initial_contents.hex", mem_array);
-`endif
+  initial begin
+    $readmemh("mem_initial_contents.hex",mem_array);
   end
+`endif
 
   assign port_ro.RRESP = `RESP_OK;
   assign port_ro.BRESP = `RESP_OK;
@@ -100,7 +128,11 @@ module AxilMemory #(
         if (port_ro.RREADY) begin
           // manager accepted our response, we generate next response
           port_ro.RVALID <= True;
+`ifdef RISCV_FORMAL
+          port_ro.RDATA <= random_insn;
+`else
           port_ro.RDATA  <= mem_array[ro_araddr[AddrMsb:AddrLsb]];
+`endif
           ro_araddr <= 0;
           ro_araddr_valid <= False;
           port_ro.ARREADY <= True;
@@ -116,7 +148,11 @@ module AxilMemory #(
           // We have sent a response and manager has accepted it. Or, we were not already sending a response.
           // Either way, send a response to the request we just accepted.
           port_ro.RVALID <= True;
+`ifdef RISCV_FORMAL
+          port_ro.RDATA <= random_insn;
+`else
           port_ro.RDATA  <= mem_array[port_ro.ARADDR[AddrMsb:AddrLsb]];
+`endif
         end
       end else if (port_ro.RVALID && port_ro.RREADY) begin
         // No incoming request. We have sent a response and manager has accepted it
@@ -131,13 +167,18 @@ module AxilMemory #(
       // as 1) the datapath never stalls in the W stage and 2) the cache is always ready
       if (port_rw.ARVALID && port_rw.ARREADY) begin
         port_rw.RVALID <= True;
+`ifdef RISCV_FORMAL
+        port_rw.RDATA <= random_data;
+`else
         port_rw.RDATA  <= mem_array[port_rw.ARADDR[AddrMsb:AddrLsb]];
+`endif
       end else if (port_rw.RVALID) begin
         port_rw.RVALID <= False;
         port_rw.RDATA  <= 0;
       end
 
       if (port_rw.AWVALID && port_rw.AWREADY && port_rw.WVALID && port_rw.WREADY) begin
+`ifndef RISCV_FORMAL
         if (port_rw.WSTRB[0]) begin
           mem_array[port_rw.AWADDR[AddrMsb:AddrLsb]][7:0] <= port_rw.WDATA[7:0];
         end
@@ -150,6 +191,7 @@ module AxilMemory #(
         if (port_rw.WSTRB[3]) begin
           mem_array[port_rw.AWADDR[AddrMsb:AddrLsb]][31:24] <= port_rw.WDATA[31:24];
         end
+`endif
         port_rw.BVALID <= True;
       end else if (port_rw.BVALID) begin
         port_rw.BVALID <= False;
@@ -159,21 +201,18 @@ module AxilMemory #(
 
 endmodule
 
-// States for cache state machine. You can change these if you want.
 typedef enum {
-  // cache can respond to an incoming request
   CACHE_AVAILABLE = 0,
-  // cache miss, waiting for fill from memory
   CACHE_AWAIT_FILL_RESPONSE = 1,
-  // cache miss, waiting for writeback to memory
   CACHE_AWAIT_WRITEBACK_RESPONSE = 2,
-  // cache waiting for manager to accept response
   CACHE_AWAIT_MANAGER_READY = 3
 } cache_state_t;
 
 module AxilCache #(
     /** size of each cache block, in bits */
     parameter int BLOCK_SIZE_BITS = 32,
+    /** associativity of the cache */
+    parameter int WAYS = 1,
     /** number of blocks in each way of the cache */
     parameter int NUM_SETS = 4
 ) (
@@ -183,35 +222,46 @@ module AxilCache #(
     axi_if.manager mem
 );
 
-  // TODO: calculate these
-  localparam int BlockOffsetBits = 2;
+  localparam int BlockOffsetBits = $clog2(BLOCK_SIZE_BITS / 8);
   localparam int IndexBits = $clog2(NUM_SETS);
-  localparam int TagBits = `ADDR_WIDTH - IndexBits - BlockOffsetBits;
+  localparam int TagBits = proc.ADDR_WIDTH - (IndexBits + BlockOffsetBits);
+  localparam int AddrMsb = (IndexBits + BlockOffsetBits) - 1;
+
+  // veril8or 5.030 can't expose packed arrays to cocotb, unfortunately, fields are packed into a single bit string.
+  // cocotb also cannot access an unpacked array of bits like `logic foo[LEN]`.
+  // With `logic [LEN-1:0] foo`, cocotb sees an int and we can read, but not write, individual bits via indexing.
+  // However, with a bit inside a packed struct wrapper, cocotb can index it naturally!
+  typedef struct packed {
+      logic l;
+  } lru_t;
 
   // cache state
   cache_state_t current_state;
-  // main cache structures: do not rename as tests reference these names
+  // logic [BLOCK_SIZE_BITS-1:0] data[NUM_SETS][WAYS];
+  // logic [TagBits-1:0] tag[NUM_SETS][WAYS];
   logic [BLOCK_SIZE_BITS-1:0] data[NUM_SETS];
   logic [TagBits-1:0] tag[NUM_SETS];
-  logic [0:0] valid[NUM_SETS];
-  logic [0:0] dirty[NUM_SETS];
-
-  localparam bit True = 1'b1;
-  localparam bit False = 1'b0;
+  logic [WAYS-1:0] valid[NUM_SETS];
+  logic [WAYS-1:0] dirty[NUM_SETS];
+  lru_t lru[NUM_SETS];
 
   // initialize cache state to all zeroes
-  genvar seti;
+  genvar seti, wayi;
   for (seti = 0; seti < NUM_SETS; seti = seti + 1) begin : gen_cache_init
     initial begin
       valid[seti] = '0;
       dirty[seti] = '0;
+      lru[seti] = '0;
       data[seti] = 0;
       tag[seti] = 0;
     end
   end
 
+`ifndef FORMAL
   always_comb begin
-    // addresses should always be 4B-aligned
+    // TODO: generalize LRU state
+    assert (WAYS <= 2);
+    // memory addresses should always be 4B-aligned
     assert (!proc.ARVALID || proc.ARADDR[1:0] == 2'b00);
     assert (proc.ARPROT == 3'd0);
     assert (!proc.AWVALID || proc.AWADDR[1:0] == 2'b00);
@@ -219,632 +269,278 @@ module AxilCache #(
     // cache is single-ported
     assert (!(proc.ARVALID && (proc.AWVALID || proc.WVALID)));
   end
-  // the cache never raises any errors
+`endif
+  // our cache never raises any errors
   assign proc.RRESP = `RESP_OK;
   assign proc.BRESP = `RESP_OK;
-  // ------------------------
-  // AXI-Lite Signal Summary (with driver annotation)
-  // ------------------------
 
-  // Global Signals
-  // ACLK    | Global | Shared clock for all transactions
-  // ARESETn | Global | Active-low reset
+  // cache lookup (pure combinational)
+  localparam bit True = 1'b1;
+  localparam bit False = 1'b0;
+  wire [proc.ADDR_WIDTH-1:0] req_addr = proc.ARVALID ? proc.ARADDR : proc.AWVALID ? proc.AWADDR : 0;
+  wire [IndexBits-1:0] cache_index = req_addr[AddrMsb -: IndexBits];
+  wire [TagBits-1:0] req_tag = req_addr[proc.ADDR_WIDTH-1 -: TagBits];
+  wire is_read_request = (proc.ARVALID && proc.ARREADY);
+  wire is_write_request = (proc.AWVALID && proc.WVALID && proc.AWREADY && proc.WREADY);
+  wire is_request = is_read_request || is_write_request;
+  // either we're not sending a response, or our response was accepted
+  wire can_send_new_response = !proc.RVALID || (proc.RVALID && proc.RREADY);
+  wire [WAYS-1:0] way_hit_1hot;
+  for (wayi = 0; wayi < WAYS; wayi = wayi + 1) begin: gen_way_hit
+    // assign way_hit_1hot[wayi] = valid[cache_index][wayi] && (tag[cache_index][wayi] == req_tag);
+    assign way_hit_1hot[wayi] = valid[cache_index][wayi] && (tag[cache_index] == req_tag);
+  end
+  wire [1 == WAYS ? 0 : $clog2(WAYS)-1:0] way_hit_index;
+  encoder #(.INPUT_WIDTH(WAYS)) way_encoder (.one_hot(way_hit_1hot), .binary(way_hit_index));
+  wire cache_hit = |way_hit_1hot;
+  wire is_read = proc.ARVALID;
 
-  // ------------------------------
-  // Read Address (AR) Channel
-  // ------------------------------
-  // ARVALID | proc  | Asserts when proc issues a read request
-  // ARREADY | cch   | Asserted by cache when ready to accept proc request
-  // ARADDR  | proc  | Address to read from
-  // ARPROT  | proc  | Protection bits (unused)
+  wire victim_way_index = 1 == WAYS ? 0 : lru[cache_index].l;
+  wire victim_is_dirty = dirty[cache_index][victim_way_index];
+  // wire [proc.ADDR_WIDTH-1:0] victim_addr = {tag[cache_index][victim_way_index],cache_index,{BlockOffsetBits{1'b0}}};
+  wire [proc.ADDR_WIDTH-1:0] victim_addr = {tag[cache_index],cache_index,{BlockOffsetBits{1'b0}}};
 
-  // mem.ARVALID | cch  | Cache issues read to memory
-  // mem.ARREADY | mem  | Memory ready to accept read
-  // mem.ARADDR  | cch  | Read address sent to memory
-  // mem.ARPROT  | cch  | Protection bits (unused)
+  // TODO: we assume that we cannot have read & write requests in same cycle
+  // TODO: we assume awaddr, wdata & wstrb always arrive in the same cycle
 
-  // ------------------------------
-  // Read Data (R) Channel
-  // ------------------------------
-  // RVALID  | cch   | Cache has data to return to proc
-  // RREADY  | proc  | Proc has accepted read data
-  // RDATA   | cch   | Data returned to proc
-  // RRESP   | cch   | Read response (OKAY, etc.)
-
-  // mem.RVALID | mem  | Memory returns data
-  // mem.RREADY | cch  | Cache ready to accept data
-  // mem.RDATA  | mem  | Data from memory
-  // mem.RRESP  | mem  | Response code
-
-  // ------------------------------
-  // Write Address (AW) Channel
-  // ------------------------------
-  // AWVALID | proc  | Proc issues write address
-  // AWREADY | cch   | Cache ready to accept write address
-  // AWADDR  | proc  | Address to write to
-  // AWPROT  | proc  | Protection bits (unused)
-
-  // mem.AWVALID | cch  | Cache sends write address to memory
-  // mem.AWREADY | mem  | Memory ready to accept address
-  // mem.AWADDR  | cch  | Write address to memory
-  // mem.AWPROT  | cch  | Protection bits (unused)
-
-  // ------------------------------
-  // Write Data (W) Channel
-  // ------------------------------
-  // WVALID  | proc  | Proc issues write data
-  // WREADY  | cch   | Cache ready to accept write data
-  // WDATA   | proc  | Write data
-  // WSTRB   | proc  | Byte write mask
-
-  // mem.WVALID | cch  | Cache sends write data to memory
-  // mem.WREADY | mem  | Memory ready to accept data
-  // mem.WDATA  | cch  | Write data
-  // mem.WSTRB  | cch  | Write mask
-
-  // ------------------------------
-  // Write Response (B) Channel
-  // ------------------------------
-  // BVALID  | cch   | Cache returns write response to proc
-  // BREADY  | proc  | Proc ready to accept write response
-  // BRESP   | cch   | Write response code
-
-  // mem.BVALID | mem  | Memory returns write response
-  // mem.BREADY | cch  | Cache ready to accept it
-  // mem.BRESP  | mem  | Write response code
-
-  // Legend:
-  // proc = datapath/processor (AXI manager)
-  // cch  = AxilCache (AXI subordinate to proc, manager to mem)
-  // mem  = AxilMemory (AXI subordinate)
-
-  // ------------------- //
-  // Cache state machine //
-  // ------------------- //
-
-  // we define an always_ff block to maintain state
-  // we use an always_comb block to calculate the next state and handle requests
-
+  logic read_miss;
+  typedef struct packed {
+    logic is_read;
+    logic [proc.ADDR_WIDTH-1:0] req_addr;
+    logic [proc.DATA_WIDTH-1:0] wdata;
+    logic [(proc.DATA_WIDTH/8)-1:0] wstrb;
+    logic [IndexBits-1:0] cache_index;
+    logic [TagBits-1:0] tag;
+    logic [1 == WAYS ? 0 : $clog2(WAYS)-1:0] way_hit_index;
+    logic [1 == WAYS ? 0 : $clog2(WAYS)-1:0] victim_way_index;
+  } request_t;
+  request_t saved;
 
   always_ff @(posedge ACLK) begin
     if (!ARESETn) begin
       current_state <= CACHE_AVAILABLE;
-
+      read_miss <= False;
+      saved <= '0;
       proc.ARREADY <= True;
+      proc.RVALID <= False;
+      proc.RDATA <= 0;
 
-      proc_rvalid <= False;
-      proc_rdata <= 0;
-
+      proc.AWREADY <= True;
       proc.WREADY <= True;
-      proc.BVALID <= False;
+      proc.BVALID <= 0;
+
+      mem.ARVALID <= False;
+      mem.ARADDR <= 0;
+      mem.RREADY <= False;
+
+      mem.AWVALID <= False;
+      mem.AWADDR <= 0;
+      mem.WVALID <= False;
+      mem.WDATA <= 0;
+      mem.WSTRB <= 0;
+      mem.BREADY <= False;
     end else begin
-      current_state <= n_current_state;
+      case (current_state)
+        CACHE_AVAILABLE: begin
+          proc.ARREADY <= True;
+          proc.AWREADY <= True;
+          proc.WREADY <= True;
+          if (is_request && cache_hit) begin
+            if (can_send_new_response) begin
+              // update lru
+              lru[cache_index].l <= ~way_hit_index;
+              if (is_read) begin
+                proc.RVALID <= True;
+                // proc.RDATA <= data[cache_index][way_hit_index];
+                proc.RDATA <= data[cache_index];
+              end else begin // write
+                proc.BVALID <= True;
+                if (proc.WSTRB[0]) begin
+                  // data[cache_index][way_hit_index][7:0] <= proc.WDATA[7:0];
+                  data[cache_index][7:0] <= proc.WDATA[7:0];
+                  dirty[cache_index][way_hit_index] <= 1;
+                end
+                if (proc.WSTRB[1]) begin
+                  // data[cache_index][way_hit_index][15:8] <= proc.WDATA[15:8];
+                  data[cache_index][15:8] <= proc.WDATA[15:8];
+                  dirty[cache_index][way_hit_index] <= 1;
+                end
+                if (proc.WSTRB[2]) begin
+                  // data[cache_index][way_hit_index][23:16] <= proc.WDATA[23:16];
+                  data[cache_index][23:16] <= proc.WDATA[23:16];
+                  dirty[cache_index][way_hit_index] <= 1;
+                end
+                if (proc.WSTRB[3]) begin
+                  // data[cache_index][way_hit_index][31:24] <= proc.WDATA[31:24];
+                  data[cache_index][31:24] <= proc.WDATA[31:24];
+                  dirty[cache_index][way_hit_index] <= 1;
+                end
+              end
+            end else begin
+              // manager hasn't accepted our response, stop accepting new requests
+              proc.ARREADY <= False;
+              saved <= '{
+                is_read: is_read,
+                req_addr: req_addr,
+                wstrb: proc.WSTRB,
+                wdata: proc.WDATA,
+                cache_index: cache_index,
+                tag: req_tag,
+                way_hit_index: way_hit_index,
+                victim_way_index: victim_way_index
+              };
+              current_state <= CACHE_AWAIT_MANAGER_READY;
+            end
 
-      proc_rvalid <= n_proc_rvalid;
-      proc_rdata <= n_proc_rdata;
+            // if manager isn't ready for our response, stop accepting requests
+            if (!proc.RREADY || !proc.BREADY) begin
+              proc.ARREADY <= False;
+              proc.AWREADY <= False;
+              proc.WREADY <= False;
+            end
+          end else if (is_request && !cache_hit) begin
+            proc.ARREADY <= False;
+            proc.AWREADY <= False;
+            proc.WREADY <= False;
+            read_miss <= is_read;
+            saved <= '{
+              is_read: is_read,
+              req_addr: req_addr,
+              wstrb: proc.WSTRB,
+              wdata: proc.WDATA,
+              cache_index: cache_index,
+              tag: req_tag,
+              way_hit_index: way_hit_index,
+              victim_way_index: victim_way_index
+            };
+            if (!victim_is_dirty) begin
+              // clean miss: send read request to memory
+              mem.ARVALID <= True;
+              mem.ARADDR <= req_addr;
+              mem.RREADY <= True;
+              current_state <= CACHE_AWAIT_FILL_RESPONSE;
+            end else begin
+              // dirty miss: writeback dirty line
+              mem.AWVALID <= True;
+              mem.AWADDR <= victim_addr;
+              mem.WVALID <= True;
+              // mem.WDATA <= data[cache_index][victim_way_index];
+              mem.WDATA <= data[cache_index];
+              mem.WSTRB <= 4'hF;
+              mem.BREADY <= True;
+              current_state <= CACHE_AWAIT_WRITEBACK_RESPONSE;
+            end
+          end
+          if ((proc.RVALID && proc.RREADY) && !(is_read_request && cache_hit)) begin
+            proc.RVALID <= False;
+            proc.RDATA <= 0;
+          end
+          if ((proc.BVALID && proc.BREADY) && !(is_write_request && cache_hit)) begin
+            proc.BVALID <= False;
+          end
+        end
 
-      proc.ARREADY  <= n_proc_arready;
-      proc.AWREADY  <= n_proc_awready;
-      proc.WREADY   <= n_proc_wready;
-      proc.BVALID   <= n_proc_bvalid;
-    end
-  end // always_ff
+        CACHE_AWAIT_MANAGER_READY: begin
+          if (proc.RREADY) begin
+            assert(saved.is_read);
+            lru[saved.cache_index].l <= ~saved.way_hit_index;
+            proc.RVALID <= True;
+            // proc.RDATA <= data[saved.cache_index][saved.way_hit_index];
+            proc.RDATA <= data[saved.cache_index];
+            current_state <= CACHE_AVAILABLE;
+          end
+        end
 
-  // define next_state variables
-  cache_state_t n_current_state;
-  logic [BLOCK_SIZE_BITS-1:0] proc_rdata, n_proc_rdata;
-  logic n_proc_arready, proc_rvalid, n_proc_rvalid, n_proc_awready, n_proc_wready, n_proc_bvalid;
+        CACHE_AWAIT_FILL_RESPONSE: begin
+          if (mem.ARREADY) begin
+            // our request was received by the memory
+            mem.ARVALID <= False;
+            mem.ARADDR <= 0;
+          end
+          if (mem.RVALID && mem.RRESP == `RESP_OK) begin
+            // fill data from memory into cache
+            // data[saved.cache_index][saved.victim_way_index] <= mem.RDATA;
+            data[saved.cache_index] <= mem.RDATA;
+            valid[saved.cache_index][saved.victim_way_index] <= True;
+            dirty[saved.cache_index][saved.victim_way_index] <= False;
+            // tag[saved.cache_index][saved.victim_way_index] <= saved.tag;
+            tag[saved.cache_index] <= saved.tag;
+            mem.RREADY <= False;
 
-  // define internal signals
+            // respond to proc
+            current_state <= CACHE_AVAILABLE;
+            proc.ARREADY <= True;
+            proc.AWREADY <= True;
+            proc.WREADY <= True;
 
+            // perform cache hit
+            lru[saved.cache_index].l <= ~saved.way_hit_index;
+            if (read_miss) begin
+              proc.RDATA <= mem.RDATA;
+              proc.RVALID <= True;
+            end else begin
+              proc.BVALID <= True;
+              if (saved.wstrb[0]) begin
+                // data[saved.cache_index][saved.way_hit_index][7:0] <= saved.wdata[7:0];
+                data[saved.cache_index][7:0] <= saved.wdata[7:0];
+                dirty[saved.cache_index][saved.way_hit_index] <= 1;
+              end
+              if (saved.wstrb[1]) begin
+                // data[saved.cache_index][saved.way_hit_index][15:8] <= saved.wdata[15:8];
+                data[saved.cache_index][15:8] <= saved.wdata[15:8];
+                dirty[saved.cache_index][saved.way_hit_index] <= 1;
+              end
+              if (saved.wstrb[2]) begin
+                // data[saved.cache_index][saved.way_hit_index][23:16] <= saved.wdata[23:16];
+                data[saved.cache_index][23:16] <= saved.wdata[23:16];
+                dirty[saved.cache_index][saved.way_hit_index] <= 1;
+              end
+              if (saved.wstrb[3]) begin
+                // data[saved.cache_index][saved.way_hit_index][31:24] <= saved.wdata[31:24];
+                data[saved.cache_index][31:24] <= saved.wdata[31:24];
+                dirty[saved.cache_index][saved.way_hit_index] <= 1;
+              end
+            end
+          end
+        end
 
-  // Select correct address bits, depending on type of instruction
-  wire [IndexBits-1:0] imm_index_read, imm_index_write, process_index;
-  wire [TagBits-1:0] imm_tag_in_read, imm_tag_in_write, process_tag_in;
-  wire [BLOCK_SIZE_BITS - 1:0] process_write_data;
+        CACHE_AWAIT_WRITEBACK_RESPONSE: begin
+          if (mem.AWREADY) begin
+            // our request was received by the memory
+            mem.AWVALID <= False;
+            mem.AWADDR <= 0;
+            mem.WVALID <= False;
+            mem.WDATA <= 0;
+            mem.WSTRB <= 0;
+          end
+          if (mem.BVALID && mem.BRESP == `RESP_OK) begin
+            // writeback was completed by memory, now send fill request
+            mem.ARVALID <= True;
+            mem.ARADDR <= saved.req_addr;
+            mem.RREADY <= True;
+            mem.BREADY <= False;
+            current_state <= CACHE_AWAIT_FILL_RESPONSE;
+          end
+        end
 
-  assign imm_index_read  = proc.ARADDR[IndexBits+BlockOffsetBits-1:BlockOffsetBits];
-  assign imm_tag_in_read = proc.ARADDR[TagBits+IndexBits+BlockOffsetBits-1:IndexBits+BlockOffsetBits];
-
-  assign imm_index_write  = proc.AWADDR[IndexBits+BlockOffsetBits-1:BlockOffsetBits];
-  assign imm_tag_in_write = proc.AWADDR[TagBits+IndexBits+BlockOffsetBits-1:IndexBits+BlockOffsetBits];
-
-  logic [IndexBits -1:0]      s_index_buffer, n_index_buffer, f_index_buffer, nf_index_buffer;
-  logic [TagBits-1:0]         s_tag_buffer,   n_tag_buffer,   f_tag_buffer,   nf_tag_buffer;
-  logic [BLOCK_SIZE_BITS-1:0] s_wdata_buffer, n_wdata_buffer, f_wdata_buffer, nf_wdata_buffer;
-  logic [3:0]                 s_wstrb_buffer, n_wstrb_buffer, f_wstrb_buffer, nf_wstrb_buffer;
-  logic                       s_write,        n_write,        f_write,        nf_write;
-
-  logic we, wf_mem, dirty_out;
-  logic [BLOCK_SIZE_BITS-1:0] data_out;
-  logic [IndexBits-1:0] index_out;
-  logic [3:0] wstrb_out;
-  logic [TagBits-1:0] tag_out;
-
-  // write to registers
-  always_ff @(posedge ACLK) begin
-    if (we) begin
-      case (wstrb_out)
-        4'b0001: data[index_out][7:0] <= data_out[7:0];
-        4'b0010: data[index_out][15:8] <= data_out[15:8];
-        4'b0100: data[index_out][23:16] <= data_out[23:16];
-        4'b1000: data[index_out][31:24] <= data_out[31:24];
-        4'b0011: data[index_out][15:0] <= data_out[15:0];
-        4'b1100: data[index_out][31:16] <= data_out[31:16];
-        4'b1111: data[index_out] <= data_out;
-        default: begin end
+        default: begin
+        end
       endcase
-      if (wf_mem) begin
-        //block is from memory
-        tag[index_out] <= tag_out;
-        valid[index_out] <= True;
-      end
-      dirty[index_out] <= dirty_out;
     end
   end
 
-  // update buffers
-  always_ff @(posedge ACLK) begin
-    if (!ARESETn) begin
-      s_index_buffer <= 0;
-      s_tag_buffer <= 0;
-      s_wdata_buffer <= 0;
-      s_wstrb_buffer <= 0;
-      s_write <= 0;
-
-      f_index_buffer <= 0;
-      f_tag_buffer <= 0;
-      f_wdata_buffer <= 0;
-      f_wstrb_buffer <= 0;
-      f_write <= 0;
-    end else begin
-      s_index_buffer <= n_index_buffer;
-      s_tag_buffer <= n_tag_buffer;
-      s_wdata_buffer <= n_wdata_buffer;
-      s_wstrb_buffer <= n_wstrb_buffer;
-      s_write <= n_write;
-
-      f_index_buffer <= nf_index_buffer;
-      f_tag_buffer <= nf_tag_buffer;
-      f_wdata_buffer <= nf_wdata_buffer;
-      f_wstrb_buffer <= nf_wstrb_buffer;
-      f_write <= nf_write;
-    end
-  end
-
-  always_comb begin
-    // default values for all outputs
-    n_current_state = current_state;
-    n_proc_arready = proc.ARREADY;
-    n_proc_rvalid = proc_rvalid;
-    n_proc_rdata = proc_rdata;
-    n_proc_awready = proc.AWREADY;
-    n_proc_wready = proc.WREADY;
-    n_proc_bvalid = proc.BVALID;
-    proc.RVALID = proc_rvalid;
-    proc.RDATA = proc_rdata;
-
-    // default values for ram signals
-    mem.ARVALID = False;
-    mem.ARADDR = 0;
-    mem.RREADY = False;
-
-    mem.AWVALID = False;
-    mem.AWADDR = 0;
-    mem.WVALID = False;
-    mem.WDATA = 0;
-    mem.WSTRB = 0;
-    mem.BREADY = False;
-
-    we = 0;
-    wf_mem = 0;
-    data_out = 0;
-    index_out = 0;
-    wstrb_out = 0;
-    tag_out = 0;
-    // case on current state
-    case (current_state)
-      CACHE_AVAILABLE: begin
-        n_proc_arready = True;
-        n_proc_awready = True;
-        n_proc_wready = True;
-        // in this state we have no buffered requests - we respond to any incoming request
-        if (proc.ARVALID && proc.ARREADY) begin
-          if (valid[imm_index_read] && tag[imm_index_read] == imm_tag_in_read) begin
-            // cache hit
-            n_proc_rvalid = True;
-            n_proc_rdata = data[imm_index_read];
-            n_current_state = CACHE_AWAIT_MANAGER_READY;
-          end else begin
-            //Cache miss - we need to fetch the dirty block from memory
-            //fill buffer
-            nf_index_buffer = imm_index_read;
-            nf_tag_buffer = imm_tag_in_read;
-            nf_write = 0;
-
-            if (dirty[imm_index_read]) begin
-              //Write this block back to memory
-              mem.AWVALID = True;
-              mem.AWADDR = {tag[imm_index_read], imm_index_read, 2'b00};
-              mem.WVALID = True;
-              mem.WDATA = data[imm_index_read];
-              mem.WSTRB = 4'b1111;
-              mem.BREADY = True;
-
-              mem.RREADY = False;
-              n_current_state = CACHE_AWAIT_WRITEBACK_RESPONSE;
-            end else begin
-              mem.ARVALID = True;
-              mem.ARADDR = {imm_tag_in_read, imm_index_read, 2'b00};
-              mem.RREADY = True;
-              n_current_state = CACHE_AWAIT_FILL_RESPONSE;
-            end
-          end
-        end else if (proc.AWVALID && proc.WVALID && proc.ARREADY) begin
-          // cache hit
-          if (valid[imm_index_write] && tag[imm_index_write] == imm_tag_in_write) begin
-            // cache hit
-            we = 1;
-            data_out = proc.WDATA;
-            index_out = imm_index_write;
-            wstrb_out = proc.WSTRB;
-            dirty_out = proc.WSTRB != 0;
-
-            n_proc_bvalid = True;
-            n_current_state = CACHE_AWAIT_MANAGER_READY;
-          end else begin
-            // cache miss
-            nf_index_buffer = imm_index_write;
-            nf_tag_buffer = imm_tag_in_write;
-            nf_wdata_buffer = proc.WDATA;
-            nf_wstrb_buffer = proc.WSTRB;
-            nf_write = 1;
-            if (dirty[imm_index_write]) begin
-              //Write this block back to memory
-              mem.AWVALID = True;
-              mem.AWADDR = {tag[imm_index_write], imm_index_write, 2'b00};
-              mem.WVALID = True;
-              mem.WDATA = data[imm_index_write];
-              mem.WSTRB = 4'b1111;
-              mem.BREADY = True;
-
-              mem.RREADY = False;
-              n_current_state = CACHE_AWAIT_WRITEBACK_RESPONSE;
-            end else begin
-              mem.ARVALID = True;
-              mem.ARADDR = {imm_tag_in_write, imm_index_write, 2'b00};
-              mem.RREADY = True;
-              n_current_state = CACHE_AWAIT_FILL_RESPONSE;
-            end
-          end
-        end else begin
-          n_current_state = CACHE_AVAILABLE;
-        end
-      end
-
-      CACHE_AWAIT_FILL_RESPONSE: begin
-        mem.RREADY = True;
-        if (mem.RVALID && mem.RREADY) begin
-          // process incoming response
-          if (f_write) begin
-            case (f_wstrb_buffer)
-              4'b0001: data_out = {mem.RDATA[31:8], f_wdata_buffer[7:0]};
-              4'b0010: data_out = {mem.RDATA[31:16], f_wdata_buffer[15:8], mem.RDATA[7:0]};
-              4'b0100: data_out = {mem.RDATA[31:24], f_wdata_buffer[23:16], mem.RDATA[15:0]};
-              4'b1000: data_out = {f_wdata_buffer[31:24], mem.RDATA[23:0]};
-              4'b0011: data_out = {mem.RDATA[31:16], f_wdata_buffer[15:0]};
-              4'b1100: data_out = {f_wdata_buffer[31:16], mem.RDATA[15:0]};
-              4'b1111: data_out = f_wdata_buffer;
-              default: begin data_out = {mem.RDATA[31:8], f_wdata_buffer[7:0]}; end
-            endcase
-            n_proc_bvalid = True;
-            dirty_out = f_wstrb_buffer != 0;
-          end else begin
-            data_out = mem.RDATA;
-
-            if (!proc.RREADY) begin
-              n_proc_rvalid = True;
-              n_proc_rdata = mem.RDATA;
-            end
-
-            proc.RVALID = True;
-            proc.RDATA = mem.RDATA;
-
-            dirty_out = 0;
-          end
-          index_out = f_index_buffer;
-          tag_out = f_tag_buffer;
-          wstrb_out = 4'b1111;
-          we = 1;
-          wf_mem = 1;
-
-          n_current_state = CACHE_AWAIT_MANAGER_READY;
-        end else begin
-          n_current_state = CACHE_AWAIT_FILL_RESPONSE;
-        end
-
-        // buffer any instructions recieved this cycle
-        if (proc.ARVALID && proc.ARREADY) begin
-          n_index_buffer = imm_index_read;
-          n_tag_buffer = imm_tag_in_read;
-          n_wdata_buffer = 0;
-          n_wstrb_buffer = 0;
-          n_write = 0;
-          // we are now unable to accept any new requsts
-          n_proc_arready = False;
-          n_proc_awready = False;
-          n_proc_wready = False;
-        end else if (proc.AWVALID && proc.WVALID && proc.ARREADY) begin
-          // process incoming response
-          n_index_buffer = imm_index_write;
-          n_tag_buffer = imm_tag_in_write;
-          n_wdata_buffer = proc.WDATA;
-          n_wstrb_buffer = proc.WSTRB;
-          n_write = 1;
-          // we are now unable to accept any new requsts
-          n_proc_arready = False;
-          n_proc_awready = False;
-          n_proc_wready = False;
-        end
-      end
-
-      CACHE_AWAIT_WRITEBACK_RESPONSE: begin
-        mem.BREADY = True;
-
-        if (mem.BVALID && mem.BREADY) begin
-          n_current_state = CACHE_AWAIT_FILL_RESPONSE;
-
-          mem.ARVALID = True;
-          mem.ARADDR = {f_tag_buffer, f_index_buffer, 2'b00};
-        end else begin
-          n_current_state = CACHE_AWAIT_WRITEBACK_RESPONSE;
-        end
-
-        // buffer any instructions recieved this cycle
-        if (proc.ARVALID && proc.ARREADY) begin
-          n_index_buffer = imm_index_read;
-          n_tag_buffer = imm_tag_in_read;
-          n_wdata_buffer = 0;
-          n_wstrb_buffer = 0;
-          n_write = 0;
-          // we are now unable to accept any new requsts
-          n_proc_arready = False;
-          n_proc_awready = False;
-          n_proc_wready = False;
-        end else if (proc.AWVALID && proc.WVALID && proc.ARREADY) begin
-          // process incoming response
-          n_index_buffer = imm_index_write;
-          n_tag_buffer = imm_tag_in_write;
-          n_wdata_buffer = proc.WDATA;
-          n_wstrb_buffer = proc.WSTRB;
-          n_write = 1;
-          // we are now unable to accept any new requsts
-          n_proc_arready = False;
-          n_proc_awready = False;
-          n_proc_wready = False;
-        end
-      end
-
-      CACHE_AWAIT_MANAGER_READY: begin
-        if (proc.RVALID && proc.RREADY) begin
-          n_proc_rvalid = 0;
-          n_proc_rdata = 0;
-        end else if (proc.BVALID && proc.BREADY) begin
-          n_proc_bvalid = 0;
-        end else begin
-          n_current_state = CACHE_AWAIT_MANAGER_READY;
-        end
-
-        if (proc.ARVALID && proc.ARREADY) begin
-          if ((proc.RVALID && !proc.RREADY) || (proc.BVALID && !proc.BREADY)) begin
-              // We have sent a response but manager has not accepted it. Buffer the new read request.
-              n_index_buffer = imm_index_read;
-              n_tag_buffer = imm_tag_in_read;
-              n_wdata_buffer = 0;
-              n_wstrb_buffer = 0;
-              n_write = 0;
-              // we are now unable to accept any new requsts
-              n_proc_arready = False;
-              n_proc_awready = False;
-              n_proc_wready = False;
-              n_current_state = CACHE_AWAIT_MANAGER_READY;
-          end else begin
-             if (valid[imm_index_read] && tag[imm_index_read] == imm_tag_in_read) begin
-              // cache hit
-              n_proc_rvalid = True;
-              n_proc_rdata = data[imm_index_read];
-              n_current_state = CACHE_AWAIT_MANAGER_READY;
-            end else begin
-              //Cache miss - we need to fetch the dirty block from memory
-              //fill buffer
-              nf_index_buffer = imm_index_read;
-              nf_tag_buffer = imm_tag_in_read;
-              nf_write = 0;
-
-              if (dirty[imm_index_read]) begin
-                //Write this block back to memory
-                mem.AWVALID = True;
-                mem.AWADDR = {tag[imm_index_read], imm_index_read, 2'b00};
-                mem.WVALID = True;
-                mem.WDATA = data[imm_index_read];
-                mem.WSTRB = 4'b1111;
-                mem.BREADY = True;
-
-                mem.RREADY = False;
-                n_current_state = CACHE_AWAIT_WRITEBACK_RESPONSE;
-              end else begin
-                mem.ARVALID = True;
-                mem.ARADDR = {imm_tag_in_read, imm_index_read, 2'b00};
-                mem.RREADY = True;
-                n_current_state = CACHE_AWAIT_FILL_RESPONSE;
-              end
-            end
-          end
-        end else if (proc.AWVALID && proc.AWREADY && proc.WVALID && proc.WREADY) begin
-          // process incoming response
-          if ((proc.RVALID && !proc.RREADY) || (proc.BVALID && !proc.BREADY)) begin
-            // We have sent a response but manager has not accepted it. Buffer the new write request.
-            n_index_buffer = imm_index_write;
-            n_tag_buffer = imm_tag_in_write;
-            n_wdata_buffer = proc.WDATA;
-            n_wstrb_buffer = proc.WSTRB;
-            n_write = 1;
-            // we are now unable to accept any new requsts
-            n_proc_arready = False;
-            n_proc_awready = False;
-            n_proc_wready = False;
-
-            n_current_state = CACHE_AWAIT_MANAGER_READY;
-          end else begin
-            // cache hit
-            if (valid[imm_index_write] && tag[imm_index_write] == imm_tag_in_write) begin
-              // cache hit
-              we = 1;
-              data_out = proc.WDATA;
-              index_out = imm_index_write;
-              wstrb_out = proc.WSTRB;
-
-              n_proc_bvalid = True;
-              n_current_state = CACHE_AWAIT_MANAGER_READY;
-            end else begin
-              // cache miss
-              nf_index_buffer = imm_index_write;
-              nf_tag_buffer = imm_tag_in_write;
-              nf_wdata_buffer = proc.WDATA;
-              nf_wstrb_buffer = proc.WSTRB;
-              nf_write = 1;
-              if (dirty[imm_index_write]) begin
-                //Write this block back to memory
-                mem.AWVALID = True;
-                mem.ARADDR = {tag[imm_index_write], imm_index_write, 2'b00};
-                mem.WVALID = True;
-                mem.WDATA = data[imm_index_write];
-                mem.WSTRB = 4'b1111;
-
-                n_current_state = CACHE_AWAIT_WRITEBACK_RESPONSE;
-              end else begin
-                mem.ARVALID = True;
-                mem.ARADDR = {imm_tag_in_write, imm_index_write, 2'b00};
-                n_current_state = CACHE_AWAIT_FILL_RESPONSE;
-              end
-            end
-          end
-        end else if (!proc.ARREADY && !proc.AWREADY && !proc.WREADY) begin
-          // we are unable to accept new responses => we have a buffered request
-          if ((proc.RVALID && !proc.RREADY) || (proc.BVALID && !proc.BREADY)) begin
-            //still waiting for manager - maintain the buffers
-            n_index_buffer = s_index_buffer;
-            n_tag_buffer = s_tag_buffer;
-            n_wdata_buffer = s_wdata_buffer;
-            n_wstrb_buffer = s_wstrb_buffer;
-            n_write = s_write;
-
-            n_proc_arready = False;
-            n_proc_awready = False;
-            n_proc_wready = False;
-
-            n_current_state = CACHE_AWAIT_MANAGER_READY;
-          end else begin
-            //manager accepted response - process buffered request
-            if (s_write) begin
-              // write
-              if (valid[s_index_buffer] && tag[s_index_buffer] == s_tag_buffer) begin
-                // cache hit
-                we = 1;
-                data_out = s_wdata_buffer;
-                index_out = s_index_buffer;
-                wstrb_out = s_wstrb_buffer;
-                dirty_out = s_wstrb_buffer != 0;
-
-                n_proc_bvalid = True;
-                n_current_state = CACHE_AWAIT_MANAGER_READY;
-              end else begin
-                // cache miss
-                nf_index_buffer = s_index_buffer;
-                nf_tag_buffer = s_tag_buffer;
-                nf_wdata_buffer = s_wdata_buffer;
-                nf_wstrb_buffer = s_wstrb_buffer;
-                nf_write = 1;
-                if (dirty[s_index_buffer]) begin
-                  //Write this block back to memory
-                  mem.AWVALID = True;
-                  mem.AWADDR = {tag[s_index_buffer], s_index_buffer, 2'b00};
-                  mem.WVALID = True;
-                  mem.WDATA = data[s_index_buffer];
-                  mem.WSTRB = 4'b1111;
-
-                  mem.RREADY = False;
-                  n_current_state = CACHE_AWAIT_WRITEBACK_RESPONSE;
-                end else begin
-                  mem.ARVALID = True;
-                  mem.ARADDR = {s_tag_buffer, s_index_buffer, 2'b00};
-                  n_current_state = CACHE_AWAIT_FILL_RESPONSE;
-                end
-              end
-            end else begin
-              // read
-              if (valid[s_index_buffer] && tag[s_index_buffer] == s_tag_buffer) begin
-                // cache hit
-                n_proc_rvalid = True;
-                n_proc_rdata = data[s_index_buffer];
-                n_current_state = CACHE_AWAIT_MANAGER_READY;
-              end else begin
-                //Cache miss - we need to fetch the dirty block from memory
-                //fill buffer
-                nf_index_buffer = s_index_buffer;
-                nf_tag_buffer = s_tag_buffer;
-                nf_write = 0;
-
-                if (dirty[s_index_buffer]) begin
-                  //Write this block back to memory
-                  mem.AWVALID = True;
-                  mem.AWADDR = {tag[s_index_buffer], s_index_buffer, 2'b00};
-                  mem.WVALID = True;
-                  mem.WDATA = data[s_index_buffer];
-                  mem.WSTRB = 4'b1111;
-
-                  n_current_state = CACHE_AWAIT_WRITEBACK_RESPONSE;
-                end else begin
-                  mem.ARVALID = True;
-                  mem.ARADDR = {s_tag_buffer, s_index_buffer, 2'b00};
-
-                  n_current_state = CACHE_AWAIT_FILL_RESPONSE;
-                end
-              end
-
-            end
-            //zero the buffers
-            n_index_buffer = 0;
-            n_tag_buffer = 0;
-            n_wdata_buffer = 0;
-            n_wstrb_buffer = 0;
-            n_write = 0;
-
-            n_proc_arready = True;
-            n_proc_awready = True;
-            n_proc_wready = True;
-          end
-        end else begin
-          // no buffered request, no incoming request - if manager is ready, we are now cache available
-          if ((proc.RVALID && proc.RREADY) || (proc.BVALID && proc.BREADY)) begin
-            n_current_state = CACHE_AVAILABLE;
-          end
-        end
-      end
-      default: begin end
-    endcase
-  end
 endmodule // AxilCache
 
 `ifndef SYNTHESIS
-/** This is used for testing AxilCache in simulation. Since Verilator doesn't allow
-SV interfaces in a top-level module, we wrap the interfaces with plain wires. */
+/** This is used for testing AxilCache in simulation, since Verilator doesn't allow
+SV interfaces in top-level modules */
 module AxilCacheTester #(
     // these parameters are for the AXIL interface
     parameter int ADDR_WIDTH = 32,
     parameter int DATA_WIDTH = 32,
     // these parameters are for the cache
     parameter int BLOCK_SIZE_BITS = 32,
+    parameter int WAYS = 1,
     parameter int NUM_SETS = 4
 ) (
     input wire ACLK,
@@ -941,6 +637,7 @@ module AxilCacheTester #(
 
   AxilCache #(
     .BLOCK_SIZE_BITS(BLOCK_SIZE_BITS),
+    .WAYS(WAYS),
     .NUM_SETS(NUM_SETS)
   ) cache (
       .ACLK(ACLK),
